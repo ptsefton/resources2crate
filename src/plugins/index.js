@@ -15,6 +15,7 @@ import { plugin as xlsxOutputPlugin } from "./ro-crate-xlsx-output/index.js";
 import { plugin as htmlOutputPlugin } from "./ro-crate-html-output/index.js";
 import { plugin as genericInputPlugin } from "./generic-input/index.js";
 import { plugin as docxInputPlugin } from "./docx-input/index.js";
+import { plugin as chordproInputPlugin } from "./chordpro-input/index.js";
 
 export const PLUGINS = [
   xlsxCrateInputPlugin,
@@ -33,6 +34,7 @@ export const PLUGINS = [
 export const INPUT_PLUGINS = {
   [genericInputPlugin.inputMode]: genericInputPlugin,
   [docxInputPlugin.inputMode]: docxInputPlugin,
+  [chordproInputPlugin.inputMode]: chordproInputPlugin,
 };
 
 export function registerAllPlugins(hookBus, plugins = PLUGINS) {

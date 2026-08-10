@@ -1,0 +1,72 @@
+{t: Ukulele Train}
+{st: © Peter (PT) Sefton 2024}
+{key: D}
+{instrument: Ukulele}
+
+{define: D•  2 2 2 5  fingers 1 1 1 4}
+{define: Em• 4 4 3 2  fingers 4 3 2 1}
+{define: G•  4 2 3 2  fingers 4 1 2 1}
+{define: D˟ 7 6 5 5 fingers 3 1 1 1}
+{define: Em˟ 9 7 7 7 fingers 3 1 1 1}
+{define: G˟ 7 7 7 10 fingers 3 1 1 1}
+
+{sot}
+||: [D] / / / | [D] / / / | [Em] / / / | [Em] / / / |
+   [G] / / / | [G] / / / | [D]  / / / | [D] / / / :||
+{eot}
+      
+I met my 
+[D] love  On the  Ukulele [Em] Train
+[G] Jammin' on  _Closer to Fine_  [D] platform two, Katoomba in the rain, the
+[D] Indigo Girls, they would have been [Em] proud, we were
+[G] almost in time, key of F, not too [D] loud. I missed my
+[D] love on the  Hanwell uke [Em] truck, on the
+[G]  float through Wild West London and we did not [D] suck. 
+
+{soc}
+{C: Chorus}
+Get on [D] board the Ukulele [Em] Train you can
+[G] Bring your own love, maybe find love [D] again 
+Get on [D] board the Ukulele [Em] Train you can
+[G] BYO love maybe find love [D] again  
+{eoc}
+
+HINT: If you get bored try these alternate chord fingerings: 
+[D•] [Em•] [G•] [D˟] [Em˟] [G˟]
+
+{sob}
+{c: Spoken}
+Before you [D] go we're gonna  teach you this [Em] song with a
+[G] Short harmony lesson so you don't get it [D] wrong ...
+{eob}
+
+We're in the key of  [D]  D ... so the E chord's two-[Em]-minor you don't 
+[G] want the music police to come down and fine [D] ya. When I say
+[D] E You say [Em] minor **(minor)**
+[G] Diatonic harmony, there's nothing [D] finer, two bars of  
+[D] D, (that's chord 1) [Em] bars of E **(minor)**, two of
+[G] G, (chord four) and D for two [D˟] more, and so to 
+conc[D]lude and to  finish [Em] disputes I don't 
+[G] mean to be rude but D is the  [D] **root** 
+
+{c: Hint works well mashed up  with the "Don't worry be happy" chorus or 'just say I do...' from "Marry you"  }
+
+I met my [D]  love on the ukulele [Em] train
+[G] Strumming "Don't worry be happy" yet [D] again 
+
+I met my [D] love on the concert [Em] ute croonin' "just 
+[G] say I do, I wanna get hitched to [D] you" 
+
+I met my [D] love on the ukulele [Em] train We were pumpin' out three chord 
+[G] bangers in the misty [D] rain
+
+{c: Chorus}
+
+I met my [D] love on the ukulele [Em] train We were pumpin' out three chord 
+[G] bangers in the misty [D] rain
+
+{c: Optional -- make up your own here's a recipe (salt to taste)}
+I verb my [D] *Noun* *Locative* *Compound*-[G]-*Noun* we were 
+[Em] *Verb*-ing some *Noun*. Now tell us how did it [D] sound!
+
+

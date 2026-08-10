@@ -51,8 +51,9 @@ const CORE_SETTINGS_SCHEMA = [
     options: [
       { value: "generic", label: "Generic folder of files" },
       { value: "docx", label: "Structured Word documents (.docx)" },
+      { value: "chordpro", label: "ChordPro songs and setlists (.cho/.pro + .setlist.md)" },
     ],
-    hint: "Structured Word documents parses Heading 1/2/3 styles into Collections/Chapters/DocumentParts instead of grouping files generically — see corpus-tools-person-centred-collections-docx's README for the authoring conventions (heading levels, image/caption/photo/SOUND FILE markers)." },
+    hint: "Structured Word documents parses Heading 1/2/3 styles into Collections/Chapters/DocumentParts instead of grouping files generically — see corpus-tools-person-centred-collections-docx's README for the authoring conventions (heading levels, image/caption/photo/SOUND FILE markers). ChordPro songs and setlists parses song charts and setlist Markdown files into Song/Setlist/SetlistEntry entities — see src/plugins/chordpro-input/SPEC.md." },
   { key: "themeMode", type: "select", label: "Theme", default: "light",
     options: [
       { value: "light", label: "Light" },

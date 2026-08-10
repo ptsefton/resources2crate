@@ -176,7 +176,7 @@ assert.ok(
 
 assert.deepEqual(
   Object.keys(INPUT_PLUGINS).sort(),
-  ["docx", "generic"],
+  ["chordpro", "docx", "generic"],
   "input plugins should be keyed by the inputMode that selects them"
 );
 for (const [mode, plugin] of Object.entries(INPUT_PLUGINS)) {
@@ -265,7 +265,7 @@ assert.ok(
   );
 
   assert.deepEqual(
-    Object.keys(INPUT_PLUGINS).sort(), ["docx", "generic"],
+    Object.keys(INPUT_PLUGINS).sort(), ["chordpro", "docx", "generic"],
     "the stub modes should be gone again — this test must not leak into the registry"
   );
 }
