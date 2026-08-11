@@ -7,12 +7,12 @@
 //
 // Analogous in role to docx-input's docx_crate.js: this file owns the
 // folder walk and RO-Crate entity assembly. All ChordPro/Markdown parsing
-// itself lives in lib/ (see SPEC.md §8) and is not duplicated here.
+// itself lives in the chordprobook package (see SPEC.md §1/§8) and is not
+// duplicated here.
 
 import { ROCrate } from "ro-crate";
 import { GENERATED_FILENAMES, CONTROL_FILENAMES } from "../../crate.js";
-import { ChordProSong } from "./lib/ChordProSong.js";
-import { parseSetlist, matchEntryToSong } from "./lib/Setlist.js";
+import { ChordProSong, parseSetlist, matchEntryToSong } from "chordprobook";
 
 export const DEFAULT_SONG_EXTENSIONS = [".pro", ".cho", ".cho.txt"];
 export const DEFAULT_SETLIST_SUFFIX = ".setlist.md";

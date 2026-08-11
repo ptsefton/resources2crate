@@ -1,121 +1,75 @@
-# `chordpro-input` — design spec
+# `chordpro-input` — spec
 
-**Status:** draft, not yet implemented. No code exists at this path yet. This document
-defines the plan the implementation should follow.
+## 1. What this plugin does
 
-**Location:** this document is colocated with the plugin code (`src/plugins/chordpro-input/`)
-so that the folder can later be moved into its own repository together with its
-specification. It currently assumes it is being read from within a `resources2crate`
-checkout and links to `../../../ARCHITECTURE.md` for shared context. Before extraction to
-a standalone repository, any context from that file that this document still depends on
-should be restated here rather than left as an external link.
+`chordpro-input` turns a folder of ChordPro song files and Markdown setlists into an
+RO-Crate, and then separately renders a conformant crate it built into a standalone, interactive, printable
+songbook HTML page.
 
----
+It has three Stages:
 
-## 1. Purpose
+- **Harvesting** (`index.js`, `chordpro_crate.js`): walks a picked folder, parses each song
+  and setlist file, and produces RO-Crate entities for them. This half only reads the source
+  folder — it never writes back to it, edits songs, transposes chords, or draws chord
+  diagrams.
 
-This plugin converts a folder of song charts and setlists into an RO-Crate: one entity per
-song, carrying its full ChordPro text and extracted metadata (title, key, capo, transpose,
-artist), and one entity per setlist, carrying its ordered song entries and any performance
-notes. The plugin's responsibility is limited to harvesting and structuring this data; it
-does not render or otherwise process it.
+-  **Metadata entry** and cleanup -- TODO
 
-This is the first of two planned components of a redo of
-[chordprosite](https://github.com/ptsefton/chordprosite), a songbook compiler that
-currently reads a folder of ChordPro files into an ad-hoc in-memory structure and renders
-HTML in a single script. This plugin replaces that ad-hoc structure with an RO-Crate. The
-second component — compiling a crate produced by this plugin into a standalone songbook
-site, covering chordprosite's HTML/CSS rendering, chord-diagram graphics, transposition,
-and printable pages — is a separate, later piece of work. It is out of scope for this
-document: not designed, not scheduled, and not a consideration in decisions made about
-this plugin's data model.
+- **Songbook rendering** (`songbook_html.js`): reads the RO-Crate this half of the plugin
+  just wrote and produces `songbook.html`, a single file containing the crate's own data
+  plus a client-side app that displays it — a song list, individual song views with
+  transposition and chord diagrams, setlists, and a print mode. This file is meant to be
+  opened directly (including as a `file://` URL) with no server and no build step.
 
-As part of the same redo, the intention is to extract chordprosite's song- and
-setlist-handling logic into a standalone npm library, which will also take on chord-diagram
-generation and other logic required by the second component described above. Work in this
-repository should anticipate that extraction: the metadata-parsing code this plugin needs
-(reading title, key, capo, transpose, and related fields from ChordPro and setlist text)
-should be organised as a self-contained module within this plugin's folder, structured as
-classes derived from chordprosite's existing `Song.js` and `Songs.js`, and written without
-any dependency on resources2crate's plugin context or RO-Crate APIs. Organising the code
-this way allows that module to be moved into the future standalone library with minimal
-modification when the extraction takes place. See §8 for the resulting file layout.
+The first and last stages depend on [`chordprobook`](https://github.com/ptsefton/chordprobook) (a sibling
+repository, `"chordprobook": "file:../chordprobook"` in `package.json`) for ChordPro/setlist
+parsing, chord transposition, and chord-diagram rendering.
 
 ## 2. Scope
 
 **In scope:**
-- Discover song files (ChordPro format) and setlist files (Markdown) in a picked folder.
-- Parse each song's ChordPro metadata directives (title, key, capo, transpose, artist,
-  composer) and capture its full raw text.
-- Parse each setlist's Markdown structure (title, set groupings, ordered song entries,
-  per-entry overrides, freeform notes) and resolve each entry to a song.
-- Produce entities for both, using a small custom vocabulary, added to the crate the rest
-  of the resources2crate pipeline already knows how to validate and write out as JSON,
-  xlsx, and HTML preview.
+- Discover song files (ChordPro) and setlist files (Markdown) in a picked folder.
+- Parse each song's metadata directives and capture its full raw text.
+- Parse each setlist's structure (title, set groupings, ordered entries, per-entry
+  overrides, freeform notes) and resolve each entry to a song.
+- Produce RO-Crate entities for both, writable as JSON/xlsx/HTML by the rest of the
+  resources2crate pipeline.
+- Render the resulting crate into a standalone songbook HTML page: song list, song view,
+  setlists, key/capo/instrument controls, chord diagrams, print mode.
 
-**Out of scope.** The following are permanent boundaries of this plugin's responsibility,
-not items deferred to a later revision of this plugin:
-- Rendering songs or setlists to HTML/PDF, transposing chords, or drawing chord-diagram
-  graphics. These are chordprosite's responsibility today and will be the second
-  component's responsibility once built.
-- Chord diagrams of any kind: neither the bundled default instrument fret data
-  (`chord_data/*.cho` in chordprosite, distributed under a GPL notice inherited from
-  Chordii, which would raise a licensing question requiring explicit resolution before any
-  such data is bundled into a published crate) nor inline `{define:}` overrides added by a
-  song's author. When a song file contains `{define:}` lines, they are retained as part of
-  that song's raw text and are not given any special parsing.
+**Out of scope (permanent, not deferred):**
 - Editing songs or setlists, or writing back to the source folder.
-- Any music-theory logic: transposition, Nashville numbering, or capo-shape calculation.
-  Capo, transpose, and key values are harvested as opaque values and not interpreted.
+- Bundling any default chord-shape data or `{define:}` directives from a song's own text —
+  chord shapes shown on screen or in print come only from chordprobook's own bundled data
+  (§7).
+- Any music-theory logic beyond what chordprobook already provides — transposition, capo
+  math, and Nashville numbering are chordprobook's responsibility, not reimplemented here.
 
-## 3. Fit with resources2crate's plugin architecture
+**Deferred (§9):** creating or editing setlists in the songbook page; loading additional
+songs into an already-open page; exporting the crate as a downloadable RO-Crate file.
+
+## 3. Plugin registration
 
 This is an **input-mode plugin** (`INPUT_PLUGINS`, keyed by `inputMode: "chordpro"`), the
-same category as `docx-input`. See [ARCHITECTURE.md §4.5](../../../ARCHITECTURE.md) and
-`src/plugins/docx-input/index.js` for the pattern this follows. Input modes are mutually
-exclusive: exactly one runs per build, so a chordpro build does not also run the generic
-file scan or the docx parser over the same folder.
+same category as `docx-input`. See [ARCHITECTURE.md §4.5](../../../ARCHITECTURE.md).
 
-The following consequences of that choice are noted explicitly, since they are not
-apparent from the `docx-input` example alone:
-
-- **No `analyzeFiles`.** As with `docx-input`, and unlike `generic-input`, this plugin
-  performs its own folder walk inside `buildCrate(ctx)` rather than producing a flat
-  `ctx.filesWithMeta` list for other hook handlers to annotate. Consequently `FILES_ANALYZE`
-  does not fire for a chordpro build, so `austlang`'s language-by-filename lookup, which
-  taps that hook, does not run. This is the correct outcome: subject-language
-  identification by filename is not an applicable operation on a songbook folder.
-- **`crate:built`, `crate:validate`, and `output:write` taps continue to run.** `merge`,
-  `validate-crate`, and the JSON/xlsx/HTML output plugins all operate on `ctx.crate` once
-  it exists, independent of which input plugin built it. None of them is specific to
-  `generic-input`, so a chordpro-mode build still produces JSON/xlsx/HTML output and
-  profile validation without any additional work.
-- **`src/main.js` requires a corresponding edit.** Registering a plugin in `INPUT_PLUGINS`
-  does not, by itself, add it to the user interface: the `inputMode` select in
-  `CORE_SETTINGS_SCHEMA` (`src/main.js`, near line 50) is a fixed list of `{value, label}`
-  pairs, not one derived from the plugin registry. Adding chordpro mode requires adding an
-  entry to that list. This is the one respect in which the plugin is not fully
-  self-contained within its own folder, and should be recorded both in the pull request
-  that introduces this plugin and, separately, at the point this folder is extracted into
-  its own repository, since moving the folder alone would not reproduce this integration
-  point. A possible improvement — giving `INPUT_PLUGINS` entries a `label` field and having
-  `main.js` construct the select from the registry rather than a parallel hardcoded list —
-  is noted here as a candidate follow-up, outside this plugin's own scope.
-- **No MASP profile currently selects `inputMode: "chordpro"`.** Per
-  [ARCHITECTURE.md §5.4](../../../ARCHITECTURE.md), a profile's `buildOptions.inputMode`
-  pre-selects and locks the mode. Without a profile naming it, chordpro mode remains
-  reachable but is not the default for any profile; this is adequate during development,
-  where the mode can be selected manually in Settings, but a dedicated "songbook" profile
-  is a prerequisite for a build usable by an end user without that manual step. Authoring
-  such a profile is out of scope for this plugin and is noted here as a dependency for
-  whoever undertakes it.
+- `index.js` registers `plugin` (`buildCrate(ctx)`, dynamically importing `chordpro_crate.js`
+  so its dependencies stay out of the main bundle until a chordpro build actually runs).
+- `songbook_html.js` separately registers `songbookHtmlPlugin`, an **additive** hook tap in
+  `PLUGINS` (not `INPUT_PLUGINS`) on `OUTPUT_WRITE`, alongside `ro-crate-json-output`/
+  `ro-crate-xlsx-output`/`ro-crate-html-output`. It guards on
+  `ctx.options.inputMode === "chordpro"` and no-ops otherwise.
+- A chordpro build does not run `FILES_ANALYZE` (this plugin does its own folder walk inside
+  `buildCrate`, like `docx-input`), so hook handlers that tap `FILES_ANALYZE` (e.g.
+  `austlang`) do not run against a chordpro-mode build.
+- The `inputMode` select in `CORE_SETTINGS_SCHEMA` (`src/main.js`) is a hardcoded list, not
+  derived from the plugin registry — adding this mode required a corresponding edit there.
+- No MASP profile currently sets `buildOptions.inputMode: "chordpro"` (§9).
 
 ## 4. File discovery
 
-The picked folder is scanned recursively; subfolders carry no structural meaning in this
-data model (see the open question in §9 on whether top-level folders should be treated as
-grouping entities, analogous to `docx-input`'s one-collection-per-top-level-folder
-convention). Each file is classified by extension:
+The picked folder is scanned recursively; subfolders carry no structural meaning. Each file
+is classified by extension:
 
 | Extension (default) | Treated as |
 |---|---|
@@ -123,8 +77,7 @@ convention). Each file is classified by extension:
 | `.setlist.md` | Setlist (Markdown) |
 | anything else | ignored |
 
-Both lists are **configurable** via `optionSchema` (comma-separated or array input;
-matching is case-insensitive; a leading `.` is implied if omitted):
+Both are configurable via `optionSchema`:
 
 ```js
 optionSchema: {
@@ -133,207 +86,94 @@ optionSchema: {
   default: [".pro", ".cho", ".cho.txt"],
   hint: "Files with these extensions are parsed as ChordPro song charts.",
 },
-// A second option for the setlist filename suffix is lower priority, since most
-// authors are unlikely to need to change ".setlist.md"; whether it needs to be
-// exposed in the user interface at all, rather than defined as a constant, is
-// left as an implementation decision.
 ```
 
-Dotfiles and common editor/OS artifacts (`.DS_Store`, `~$*`, etc.) are skipped, consistent
-with the convention `docx-input` already applies.
+Dotfiles and common editor/OS artifacts (`.DS_Store`, `~$*`, etc.) are skipped, matching
+`docx-input`'s own convention.
 
 ## 5. Parsing a song file
 
-Only the **metadata-extraction subset** of chordprosite's `Song.js` `initialise()` method
-should be ported — not `format()`, not `Transposer`, and not chord-highlighting or HTML
-markup generation. That logic belongs to the second component described in §1, which will
-need it against a richer in-memory `Song` object. Importing it here would introduce
-rendering-related concerns into a plugin whose responsibility is limited to data
-harvesting, and would couple this plugin's data shape to assumptions made by that rendering
-code.
+Only metadata extraction happens here — no rendering, transposition, or chord-diagram logic.
 
-**Fields extracted**, from ChordPro's `{directive: value}` lines:
+| Directive(s) | Extracted as |
+|---|---|
+| `{title}` / `{t}` | `name` |
+| `{subtitle}` / `{artist}` / `{st}` | `custom:artist` |
+| `{key}` | `musicalKey` |
+| `{capo}` | `custom:capo` (integer) |
+| `{transpose}` / `{tr}` | `custom:transpose` |
+| `{composer}` | `composer` |
+| everything else | retained as part of raw text, not extracted |
 
-| Directive(s) | Extracted as | First-wins or accumulate? |
-|---|---|---|
-| `{title}` / `{t}` | `name` | **First wins** (see note below) |
-| `{subtitle}` / `{artist}` / `{st}` | `custom:artist` | First wins |
-| `{key}` | `musicalKey` | First wins |
-| `{capo}` | `custom:capo` (integer) | First wins |
-| `{transpose}` / `{tr}` | `custom:transpose` | First wins |
-| `{composer}` | `composer` | First wins |
-| everything else | retained as part of raw text, not extracted | — |
+Every directive is first-wins (the first occurrence in the file is kept; later repeats of
+the same directive are ignored).
 
-`musicalKey` and `composer` are standard schema.org properties of `MusicComposition` — see
-§7 for the full reasoning on which fields reuse schema.org vocabulary and which stay
-custom. `artist`/`capo`/`transpose` have no schema.org equivalent and stay custom regardless
-of what type the entity carrying them has.
-
-**Divergence from chordprosite's `Song.js`.** The original accumulates `{title}` and
-`{subtitle}` across multiple occurrences (`this.title += dir.value`) and appends
-`{version: N}` as `" - VN"` onto the title, while every other directive is first-wins.
-This inconsistency appears to be an artifact of incremental development rather than a
-deliberate authoring convention: nothing in the ChordPro format specification anticipates
-multiple `{title}` directives within a single file. This plugin instead applies
-**first-wins uniformly to every metadata directive** and does not special-case
-`{version}`. Should a real song library be found to depend on the original's concatenation
-behaviour, this decision should be revisited against that evidence rather than in
-advance of it. (The `{composer}` directive is extracted here although chordprosite's own
-`Song.js` recognises it as a directive without reading it into a field; this is an
-addition made by this plugin, not a requirement for compatibility with chordprosite.)
-
-**Raw text.** The file's original text, unmodified — not stripped of its title directive
-as chordprosite's `buildDataStructure` does when producing its cleaned `content` field — is
-stored verbatim as `schema:text` on the Song entity. `schema:text` is reused rather than
-defining a custom property, since it corresponds exactly to schema.org's own purpose for
-that property. **The Song entity is the only place this text is ever written.** §6
-introduces a second `MusicComposition` entity per setlist entry (a proxy for "this song, as
-performed in this slot"); that entity deliberately never carries `schema:text` — a setlist
-naming the same song ten times must not write that song's full text ten times over. Anyone
-who needs the text follows the entry's `specializationOf` reference back to the one Song
-entity that holds it.
-
-**No file payload.** The plugin does **not** copy the source `.pro`/`.cho` file into the
-crate's own file tree in the way `generic-input` copies files into a payload alongside
-`File` entities. A Song entity carries its content as data (`schema:text`), and the crate
-does not depend on the original bytes being present alongside it to be self-sufficient.
-This is a narrower crate shape than `generic-input` produces, deliberately; it is recorded
-as an open question in §9, in case archival fidelity — retaining the literal original file
-bytes, not only their parsed text — is later found to matter.
-
-**Song identity.** `@id` is the file's path relative to the picked folder, the same
-convention `buildFileMetadata` already uses in `src/crate.js`. This makes ids stable,
-human-legible, and collision-free by construction: two distinct relative paths cannot
-collide, and two files sharing the same title can and should coexist as distinct Song
-entities.
-
-**Title fallback.** A file with no `{title}` directive falls back to its filename, minus
-extension, mirroring chordprosite's own fallback (`song.title || filePath...`) rather than
-introducing a different rule.
+- **Raw text.** The file's original text, unmodified, is stored verbatim as `text` on the
+  Song entity. **The Song entity is the only place this text is ever written** — a setlist
+  entry naming the same song (§6) never carries its own copy.
+- **No file payload.** The source file's bytes are not copied into the crate; the Song
+  entity carries its content as data (`text`) only.
+- **Identity.** `@id` is the file's path relative to the picked folder.
+- **Title fallback.** A file with no `{title}` directive falls back to its filename, minus
+  extension.
 
 ## 6. Parsing a setlist file
 
-Setlist files are Markdown with a specific dialect layered on top, not arbitrary Markdown.
-The grammar below is based on chordprosite's `Songs.js#processPlaylist` and the sample at
-`chordprosite/samples/sample.setlist.md`:
+Setlist files are Markdown with a specific dialect layered on top:
 
 ```
-{Title: Gig number 1,000}      <- optional, first non-blank line only, using the
-                                   same {directive: value} syntax as ChordPro itself
-                                   (not YAML frontmatter). Falls back to filename.
+{Title: Gig number 1,000}      <- optional, first non-blank line only, {directive: value}
+                                   syntax (not YAML frontmatter). Falls back to filename.
 
-# Set 1                        <- a set/section heading (H1). Informational
-                                   grouping only in this data model — see below.
+# Set 1                        <- a set/section heading (H1) — informational grouping only.
 
-## Slot Machine Baby           <- a setlist entry (H2): the heading text is
-                                   matched against known song titles (§6.1)
+## Slot Machine Baby           <- a setlist entry (H2): the heading text is matched against
+                                   known song titles (§6.1)
 
-> Play with a lively feel...   <- performance notes: any non-blank,
->> But not **that** lively!       non-heading line(s) immediately following
-                                   an entry, up to the next heading,
-                                   concatenated verbatim (raw Markdown,
-                                   ">>"/emphasis syntax and all) into that
-                                   entry's description. Blockquote ("> ")
-                                   markup is not required — see below.
+> Play with a lively feel...   <- performance notes: any non-blank, non-heading line(s)
+>> But not **that** lively!       immediately following an entry, up to the next heading,
+                                   concatenated verbatim into that entry's description.
+                                   Blockquote ("> ") markup is not required — any non-blank,
+                                   non-heading line counts as a note.
 
-## Baby {transpose: -2}        <- inline {directive: value} after the title
-                                   text overrides that entry's transpose/capo
-                                   for this performance, independent of the
-                                   matched song's own values
+## Baby {transpose: -2}        <- inline {directive: value} after the title overrides that
+                                   entry's transpose/capo for this performance, independent
+                                   of the matched song's own values
 ```
 
-**Notes do not require blockquote markup.** A note is any non-blank, non-heading line
-following an entry, up to the next heading, regardless of whether it happens to start with
-`>`. This was decided against the real sample file rather than in the abstract: it mixes
-blockquote-styled notes under one entry (`> Play with a lively feel...`) with a plain
-paragraph under another (`Play slow this time.`), with nothing suggesting the two carry
-different meaning — and chordprosite's own `processPlaylist` does not treat either specially
-today (it reads only `##` lines; every other line, blockquote or not, is currently just
-ignored). Requiring `>` would have silently dropped the plain-paragraph note in that same
-file, which is a worse outcome than accepting both.
-
-**Each entry is its own `MusicComposition` — a proxy for one performance slot, not a
-generic wrapper.** Rather than inventing a `SetlistEntry` type to sit between a `Setlist`
-and the `Song` it names, every entry is itself typed `MusicComposition`, exactly like the
-canonical Song entities §5 describes — see §7 for the full reasoning. It is linked back to
-the canonical Song it performs via `specializationOf` (a standard schema.org `CreativeWork`
-property: "a work that this work is a special case of"), and it never carries `schema:text`
-— see §5's "Raw text" for why that matters: the same song named in three setlists must not
-write its lyrics/chords three more times.
-
-**Sets are not modelled as their own entities.** Each entry carries the text of the
-nearest preceding `#` heading as a plain string (`custom:setName`). A harvesting crate does
-not require a separate `Set` entity to record which set an entry belongs to; a string
-property is sufficient, and — like `matchStatus`/`matchCandidates` below — nothing in
-schema.org's vocabulary fits "which section of a running order this belongs to" regardless.
-If the second component described in §1 later requires richer set-level structure (for
-example, notes scoped to an entire set, or per-set ordering metadata), that would be grounds
-to introduce a `Set` entity at that point, based on an established requirement rather than
-in anticipation of one.
-
-**Entry-level overrides.** `{transpose: N}` / `{tr: N}` and `{capo: N}` found inline on a
-`##` line are captured as `custom:transpose` / `custom:capo` directly on the entry, distinct
-from, and taking precedence over, the matched Song's own values. This is necessary because
-the same song can appear in two setlists performed in two different keys — the entry's
-values describe *this performance*, the Song's own values (linked via `specializationOf`)
-describe the song in general. This mirrors chordprosite's own per-instance override
-behaviour in `processPlaylist`.
+- **Each entry is its own `MusicComposition`** — a proxy for one performance slot, linked to
+  the canonical Song it performs via `specializationOf`. It never carries `text` (§5).
+- **Sets are a plain string, not their own entity.** Each entry carries the text of the
+  nearest preceding `#` heading as `custom:setName`.
+- **Entry-level overrides.** `{transpose: N}` / `{tr: N}` and `{capo: N}` found inline on a
+  `##` line become `custom:transpose` / `custom:capo` directly on the entry, taking
+  precedence over the matched Song's own values — the same song can appear in two setlists
+  performed in two different keys.
 
 ### 6.1 Matching an entry to a song
 
-The matching algorithm is ported directly from chordprosite's existing behaviour
-(`Songs.js#processPlaylist`) rather than redesigned, since the immediate objective is a
-working harvester rather than an improved matcher; improving the matching algorithm is a
-separate piece of work with its own tradeoffs to evaluate on its own terms.
+1. Strip any trailing `{...}` directive text and surrounding whitespace from the heading to
+   get the bare entry name.
+2. Attempt an exact match against a song's title (case-insensitive).
+3. If no exact match, build a regex by joining the entry name's words with `.*?` and test it
+   case-insensitively against every song title (`"Amazing"` matches `"Amazing Grace"`). This
+   is intentionally permissive.
+4. **Zero matches:** entry retained with no `specializationOf`; `custom:matchStatus:
+   "unresolved"`.
+5. **Exactly one match:** linked via `specializationOf`; `custom:matchStatus` is `"exact"` or
+   `"fuzzy"` depending on which step matched.
+6. **Multiple matches:** the first match is used and linked via `specializationOf` (so an
+   entry always has a definite `specializationOf` when any match exists at all), but the
+   ambiguity is recorded as data: `custom:matchStatus: "ambiguous"` plus
+   `custom:matchCandidates` listing every candidate's `@id`. A build-log warning is also
+   emitted.
 
-1. Strip any trailing `{...}` directive text and surrounding whitespace from the heading
-   to obtain the bare entry name (e.g. `"Baby {transpose: -2}"` becomes `"Baby"`).
-2. Attempt an **exact** match against a song's title (case-insensitive).
-3. If no exact match is found, construct a regular expression from the entry name by
-   joining its words with `.*?` (chordprosite's `songName.replace(/\s+/g, '.*?')`) and test
-   it case-insensitively against every song title. This is intentionally permissive —
-   `"Amazing"` matches `"Amazing Grace"`, `"Baby"` matches `"Slot Machine Baby"` — matching
-   chordprosite's existing behaviour by design, not by oversight.
-4. **Zero matches:** the entry is retained with no `specializationOf` reference. It is
-   legitimate data — an entry the setlist's author included — and belongs in the crate
-   even when unresolved. It is marked `custom:matchStatus: "unresolved"`.
-5. **Exactly one match:** the entry is linked to that song via `specializationOf`, with
-   `custom:matchStatus` set to `"exact"` or `"fuzzy"` depending on which step produced the
-   match.
-6. **Multiple matches:** chordprosite's own behaviour is to use the first match, which, by
-   its own `Songs.js` logic, is not guaranteed to be the song the setlist's author
-   intended — only the one that happens to appear earliest in the scanned file list. This
-   plugin retains that resolution (first match wins, so an entry's structure does not
-   depend on which stage performs the resolution) but, unlike chordprosite, records the
-   ambiguity as data: `custom:matchStatus: "ambiguous"`, together with
-   `custom:matchCandidates` listing every candidate's `@id`, in addition to
-   `specializationOf` referencing the one selected. A build-log warning (`ctx.log(...,
-   "warn")`) is also emitted, but recording the ambiguity in the crate itself ensures it
-   remains inspectable after the build, in the data, rather than only in a log that may not
-   be retained. This allows anyone examining the crate later to identify which entries
-   require a manual decision, without needing to re-run a build.
-
-`matchStatus` is a plain string enum present on every entry, not only on entries that
-failed to resolve, so that a count of entries by resolution outcome can be obtained
-directly from the graph rather than recomputed.
+`matchStatus` is present on every entry, not only ones that failed to resolve.
 
 ## 7. Entity shapes
 
-**Revised from this document's first draft.** The first version of this section minted a
-small custom vocabulary — `custom:Song`, `custom:Setlist`, `custom:SetlistEntry` — on the
-premise that schema.org had no fit for a song's own data. That premise was wrong in two
-specific, checkable ways: schema.org's `MusicComposition` already defines a `musicalKey`
-property and a `composer` property, and `MusicPlaylist` (plus the generic `hasPart`/
-`specializationOf` from `CreativeWork`) covers a setlist and its ordered entries without
-inventing anything. What follows reuses standard vocabulary everywhere a real fit exists,
-and keeps `rdf:Property`-documented custom terms only for the handful of fields that
-genuinely have none — the same discipline `austlang` already establishes in this codebase
-(`LANGUAGE_PROPERTY_DEFINITIONS` in `src/plugins/austlang/index.js`) for its own fields.
-
-**No custom type is minted at all.** Both a Song and a setlist entry are typed
-`MusicComposition` — see §5 and §6 for why an entry is a lightweight `MusicComposition`
-"proxy" for a specific performance slot rather than some other shape. A Setlist is typed
-`MusicPlaylist`. Nothing in this plugin's graph carries a `custom:`-prefixed `@type`.
+No custom `@type` is minted. A Song and a setlist entry are both typed `MusicComposition`;
+a Setlist is typed `MusicPlaylist`.
 
 ```jsonc
 {
@@ -342,12 +182,8 @@ genuinely have none — the same discipline `austlang` already establishes in th
   "name": "Amazing Grace",
   "text": "{title: Amazing Grace}\n{key: G}\n\nA-[G]maz-ing [G7]Grace, ...",
   "musicalKey": "G"
-  // composer / custom:artist / custom:capo / custom:transpose are omitted
-  // entirely when the source file had no matching directive — never written as
-  // null or empty, following the "nothing added unconditionally" convention
-  // crate.js's fileProperties handling already applies (ARCHITECTURE.md §6.1).
-  // composer, when present, is schema.org's own property — see §5's note on
-  // why it's written as a bare string rather than a Person/Organization ref.
+  // composer / custom:artist / custom:capo / custom:transpose are omitted entirely when
+  // the source file had no matching directive — never written as null or empty.
 }
 ```
 
@@ -359,10 +195,7 @@ genuinely have none — the same discipline `austlang` already establishes in th
   "hasPart": [
     { "@id": "sample.setlist.md#entry-1" },
     { "@id": "sample.setlist.md#entry-2" }
-    // The order of this array is significant (performance order). This is
-    // documented rather than enforced by JSON-LD itself; @list semantics were
-    // considered and rejected as unnecessary for an array read only by this
-    // application.
+    // Array order is performance order — significant, but not enforced by JSON-LD itself.
   ]
 },
 {
@@ -373,151 +206,309 @@ genuinely have none — the same discipline `austlang` already establishes in th
   "custom:setName": "Set 1",
   "custom:matchStatus": "exact",
   "description": "Play with a lively feel, start with a manic synth solo!\n>> But not **that** lively!"
-  // No "text" here — see §5/§6: the full song text lives exactly once, on the
-  // Song entity `specializationOf` points at.
+  // No "text" — the full song text lives exactly once, on the Song entity above.
 }
 ```
 
-`#entry-N`-style hash ids follow `crate.js`'s existing convention of using structural hash
-ids internally and rewriting them to `arcp://` form on export (ARCHITECTURE.md §6.1); this
-plugin should use that existing mechanism rather than introduce a parallel one.
-
-**Which fields reuse schema.org vocabulary, and which stay custom:**
-
-| Field | Property used | Standard or custom? |
+| Field | Property | Standard or custom? |
 |---|---|---|
-| a song's title / an entry's raw heading text | `name` | standard (`Thing`) |
+| a song's title / an entry's raw heading | `name` | standard (`Thing`) |
 | a song's full source text | `text` | standard (`CreativeWork`) |
 | a song's key | `musicalKey` | standard (`MusicComposition`) |
-| a song's composer credit | `composer` | standard (`MusicComposition`) — written as a bare string, see §5 |
+| a song's composer credit | `composer` | standard (`MusicComposition`) — a bare string, not a Person/Organization reference |
 | a setlist's ordered entries | `hasPart` | standard (`CreativeWork`) |
-| an entry's link back to the song it performs | `specializationOf` | standard (`CreativeWork`) |
+| an entry's link to the song it performs | `specializationOf` | standard (`CreativeWork`) |
 | an entry's performance notes | `description` | standard (`Thing`) |
-| a song's or entry's performer/attribution credit | `custom:artist` | custom — free text, no schema.org property fits |
-| a song's or entry's capo position | `custom:capo` | custom — no schema.org equivalent at all |
-| a song's or entry's transpose value | `custom:transpose` | custom — no schema.org equivalent at all |
-| which set/section an entry belongs to | `custom:setName` | custom — no schema.org equivalent at all |
-| this plugin's confidence in an entry's song match | `custom:matchStatus` | custom — specific to this plugin's own harvesting process, not a property of the music itself |
-| every candidate when a match was ambiguous | `custom:matchCandidates` | custom — same reasoning as `matchStatus` |
+| performer/attribution credit | `custom:artist` | custom |
+| capo position | `custom:capo` | custom |
+| transpose value | `custom:transpose` | custom |
+| which set/section an entry belongs to | `custom:setName` | custom |
+| this plugin's confidence in a match | `custom:matchStatus` | custom |
+| every candidate when a match was ambiguous | `custom:matchCandidates` | custom |
 
-The last two — `matchStatus` and `matchCandidates` — are the one place where "no schema.org
-fit" is closer to structural than incidental: they describe *this plugin's own confidence*
-in a piece of derived data, not a fact about a song or a performance, so no amount of
-vocabulary reuse would make them disappear.
+`rdf:Property` definitions are added only when at least one entity in the build actually
+uses them:
 
-`rdf:Property` definitions to add, each only when at least one entity in the build actually
-uses it — the same "only when it's actually present" discipline `austlang` follows, rather
-than adding definitions unconditionally:
+| `@id` | `name` |
+|---|---|
+| `arcp://name,custom/terms#capo` | Capo |
+| `arcp://name,custom/terms#transpose` | Transpose |
+| `arcp://name,custom/terms#artist` | Artist |
+| `arcp://name,custom/terms#setName` | Set Name |
+| `arcp://name,custom/terms#matchStatus` | Match Status |
+| `arcp://name,custom/terms#matchCandidates` | Match Candidates |
 
-| `@id` | `name` | Used on |
-|---|---|---|
-| `arcp://name,custom/terms#capo` | Capo | a Song or an entry (both `MusicComposition`) |
-| `arcp://name,custom/terms#transpose` | Transpose | a Song or an entry |
-| `arcp://name,custom/terms#artist` | Artist | a Song |
-| `arcp://name,custom/terms#setName` | Set Name | an entry |
-| `arcp://name,custom/terms#matchStatus` | Match Status | an entry |
-| `arcp://name,custom/terms#matchCandidates` | Match Candidates | an entry |
+(`name`, `text`, `musicalKey`, `composer`, `hasPart`, `specializationOf`, `description` are
+standard schema.org properties already defined by every profile's base context.)
 
-(`name`, `text`, `musicalKey`, `composer`, `hasPart`, `specializationOf`, and `description`
-are all standard schema.org properties defined by every profile's base context; no
-definition entity is needed for any of them.)
-
-## 8. Plugin file layout
+## 8. File layout
 
 ```
 src/plugins/chordpro-input/
   SPEC.md                     this document
-  index.js                    plugin registration: name, inputMode: "chordpro",
-                               buildCrate(ctx) — resources2crate-specific glue only;
-                               no ChordPro/Markdown parsing logic of its own
-  chordpro_crate.js            folder walk and RO-Crate entity assembly; calls into
-                               lib/ for all parsing, and has no ChordPro/Markdown
-                               parsing logic of its own either
-  lib/
-    ChordProSong.js            a class derived from chordprosite's Song.js, reduced to
-                               metadata parsing (title, key, capo, transpose, artist,
-                               composer) with no formatting or transposition logic
-    Setlist.js                 setlist parsing and the matching algorithm from §6.1,
-                               adapted from chordprosite's Songs.js — as two pure
-                               functions rather than a class, since the song list a
-                               setlist matches against isn't state a Setlist owns
-    index.js                   re-exports the above
-  samples/                     the real chordprosite sample files (chordprosite's own
-                               samples/, minus its build artifacts) used as test
-                               fixtures below, not synthetic ones
-  test-chordpro-song.mjs       unit tests for lib/ChordProSong.js
-  test-chordpro-setlist.mjs    unit tests for lib/Setlist.js, including ambiguous/
-                               unresolved matches and an end-to-end pass against
-                               samples/
+  index.js                    plugin registration: name, inputMode: "chordpro", buildCrate(ctx)
+  chordpro_crate.js            folder walk and RO-Crate entity assembly; imports
+                               ChordProSong/parseSetlist/matchEntryToSong from chordprobook
+  crate_index.js                dependency-free @id/@type index over a written crate's JSON
+                               (buildCrateIndex/toArray/firstValue/resolveRef/entitiesOfType)
+                               — does not use the `ro-crate` npm library
+  songbook_html.js              renders the crate into songbook.html — see §10-§13
+  generated/
+    chordprobook_browser_bundle.js
+                               generated; do not edit by hand — see §10
+  samples/                     chordprosite's own sample files, used as test fixtures
+  test-chordpro-song.mjs       regression test for chordprobook's ChordProSong
+  test-chordpro-setlist.mjs    regression test for chordprobook's parseSetlist/matchEntryToSong
   test-chordpro-crate.mjs      integration test for chordpro_crate.js against samples/
+  test-crate-index.mjs         unit tests for crate_index.js
+  test-songbook-html.mjs       unit/integration tests for songbook_html.js
 ```
 
-Tests are colocated with the plugin's own code, alongside `lib/`, rather than living
-under the top-level `tests/` folder the rest of this repo otherwise uses — consistent with
-§1's extraction goal: the whole folder, tests and fixtures included, should be everything
-this plugin needs. `scripts/run-tests.mjs` discovers `test-*.mjs` recursively for exactly
-this reason, running each with its own directory as `cwd`.
+`chordprobook` is dynamically imported from `buildCrate` (via `chordpro_crate.js`, itself
+dynamically imported from `index.js`), so it stays out of the main application bundle until
+a chordpro build actually runs.
 
-`lib/` is written with no dependency on resources2crate's plugin context, hook bus, or
-RO-Crate APIs — it takes text in and returns plain data out. This is what makes it
-possible, per §1, to move `lib/` into the future standalone npm library largely unchanged;
-`chordpro_crate.js` and `index.js` are the resources2crate-specific layer that remains
-behind and adapts `lib/`'s output into crate entities.
+Tests are colocated with the plugin's own code, discovered recursively by
+`scripts/run-tests.mjs`, rather than living under the top-level `tests/` folder.
 
-Parsing logic in `lib/` is dynamically imported from `buildCrate` rather than imported at
-the top of `index.js`, so it stays out of the main application bundle until a chordpro
-build actually runs — the same discipline `docx-input` and `austlang` already follow for
-their own heavier dependencies.
+A `docs/chordpro-authoring.md` file, parallel to `docs/docx-authoring.md`, documenting the
+setlist dialect (§6), matching behaviour (§6.1), and configurable extensions (§4) for the
+person writing song/setlist files, has not yet been written.
 
-A `docs/chordpro-authoring.md` file, parallel to `docs/docx-authoring.md`, should be added
-once there is settled behaviour to document for the person writing song and setlist files:
-the setlist dialect in §6, the fuzzy-matching behaviour and its ambiguity handling in §6.1,
-and the configurable extensions in §4. Per ARCHITECTURE.md §4.7, this plugin makes real
-requests of its content authors and should therefore have such a document.
+## 9. Deferred and open
 
-## 9. Open questions / decisions still needed
+**Deferred (not built):**
+- Creating a new setlist or editing an existing one from within the songbook page (adding
+  songs, reordering by dragging, saving the update back into the HTML file).
+- Loading additional songs into an already-open songbook page, from a folder or pasted
+  ChordPro text.
+- Exporting the crate as a downloadable RO-Crate (data only, or with source files written
+  out via the File System Access API).
+- A dedicated print view for setlists that separates them by matching confidence, or any
+  further setlist-editing UI.
 
-Resolved during the writing of this spec, recorded here for reference rather than for
-reconsideration:
+**Open questions:**
+1. Whether a top-level folder should carry structural meaning (a grouping entity, as
+   `generic-input`/`docx-input` treat top-level folders), or remain unrepresented regardless
+   of how files are organised on disk.
+2. Whether archival fidelity — retaining byte-identical original files, not just their
+   parsed text — is required, given the crate currently stores only parsed text.
+3. First-wins-for-every-directive (§5) has not been checked against a real song library
+   that might depend on chordprosite's own accumulate-title behaviour.
+4. Duplicate or near-duplicate song titles from different files are not deduplicated or
+   cross-referenced in any way; they simply coexist as unrelated entities.
+5. No MASP profile currently selects `inputMode: "chordpro"` (§3), so an end-to-end build
+   requires manual configuration in Settings.
 
-- **Chord diagrams are deferred entirely** and are not parsed in any form (§2).
-- **Setlist matching is ported as-is from chordprosite** (exact match, then fuzzy regex,
-  then first-match-wins), with ambiguity recorded as data rather than resolved silently
-  (§6.1).
-- **The vocabulary reuses schema.org wherever a real fit exists** — `MusicComposition` for
-  both a Song and a setlist entry, `MusicPlaylist` for a Setlist, `musicalKey`/`composer`/
-  `hasPart`/`specializationOf`/`description` as the relevant properties — and mints custom
-  properties only for the handful of fields with no schema.org equivalent at all (§7).
-  Superseded revision: an earlier draft of this section instead minted `custom:Song`/
-  `custom:Setlist`/`custom:SetlistEntry` types, on the mistaken premise that schema.org had
-  no fit for a song's own data.
+---
 
-Still open:
+## 10. Songbook HTML output — what the file contains
 
-1. **Whether a top-level folder should carry meaning** — for example, becoming a grouping
-   entity, as `generic-input` and `docx-input` both treat top-level folders as structural —
-   or whether the folder structure should remain unrepresented regardless of how the user
-   organises files on disk. Chordprosite's own `samples/` folder is flat, which is the
-   assumption made in §4. This should be revisited if real song libraries are found to be
-   organised into artist or genre subfolders that should be represented as structure in
-   the crate.
-2. **No original-file payload** (§5): the crate stores parsed text as data, not the
-   original file bytes. This is adequate for the stated goal of harvesting data, but
-   whether archival fidelity — retaining byte-identical originals, which would support
-   re-export or comparison against a future re-harvest — is also required should be decided
-   explicitly rather than left as a side effect of this choice.
-3. **First-wins applied uniformly to all metadata directives** (§5) diverges from
-   chordprosite's accumulate-title/subtitle behaviour. The risk is considered low, but if a
-   real song library is found to depend on that concatenation behaviour, this plugin will
-   visibly truncate affected titles to their first occurrence. This should be checked
-   against whatever song files are used for testing before the decision is treated as
-   final.
-4. **Duplicate or near-duplicate song titles.** Chordprosite's own duplicate-detection
-   logic in `crate.js#buildFileMetadata`, based on normalised filenames, is not currently
-   connected to this plugin's matching logic or entity model: two songs titled "Amazing
-   Grace" originating from different files simply coexist as unrelated entities. This is
-   worth addressing only if it is found to matter for real song libraries; it is not
-   required before an initial version of this plugin can be used.
-5. **No MASP profile exists for `inputMode: "chordpro"`** (§3). This is a prerequisite for
-   an end-to-end build that does not require manual configuration in Settings, but
-   authoring such a profile is not part of this plugin's own scope.
+`renderSongbookHtml(crateJson)` in `songbook_html.js` produces one self-contained HTML file,
+written as `songbook.html` alongside (not replacing) `ro-crate-html-output`'s own
+`ro-crate-preview.html`. It contains three `<script>` elements, all **classic, not
+`type="module"`** — a module script's cross-origin rules block it entirely when the page is
+opened as a `file://` URL, which is how this file is meant to be opened:
+
+1. `<script type="application/ld+json" id="crate-data">` — the crate's own JSON-LD,
+   pretty-printed, with a defensive escape of any literal `</script` inside it.
+2. A classic `<script>` containing `CHORDPROBOOK_BROWSER_BUNDLE`, `CHORDPROBOOK_INSTRUMENTS_DATA`,
+   and `CHORDPROBOOK_CHORD_DATA` — see below.
+3. A classic `<script>` invoking `initSongbookApp(document, window)` — a plain function
+   exported from `songbook_html.js` and embedded via `.toString()` (its actual source, not
+   a hand-written duplicate), constituting the entire client-side app.
+
+**Embedding chordprobook.** `initSongbookApp` calls `ChordProSong`, `renderSong`,
+`Transposer`, and `ChordDiagram` as bare globals, since nothing can `import` anything once
+this is a classic script. Those globals, plus the two data constants above, are produced at
+build time by `scripts/bundle-chordprobook-for-browser.mjs` (run via `npm run
+generate:chordprobook-bundle`; nothing regenerates it automatically) from:
+- chordprobook's own `chords/Transposer.js`, `chords/ChordDiagram.js`, `ChordProSong.js`,
+  `Song.js` source, concatenated with `import`/`export` stripped and each file's body
+  wrapped in its own closure exposing only its own exported names. **The per-file closure
+  matters**: `ChordProSong.js` and `Song.js` each declare their own private
+  `DIRECTIVE_NAMES`/`Directive`, and bare top-level declarations from both would collide as
+  a `SyntaxError` once concatenated into one classic-script scope without it.
+- `instruments.yaml`, parsed with the `yaml` package at generation time (a devDependency of
+  resources2crate, used only by this script) and emitted as plain JSON — the browser never
+  parses YAML itself.
+- `chords/chord_data/*.cho`, parsed with chordprobook's `parseChordDataText()` at generation
+  time and emitted as plain JSON — the browser never parses raw `.cho` text.
+
+A generated `.js` file exporting plain string/JSON constants is what makes this importable
+identically under Vite (this app's real bundle) and under plain Node (this repo's own
+tests); a Vite `?raw` import only works under Vite, and `fs.readFileSync` only works under
+Node.
+
+`initSongbookApp` cannot import `crate_index.js` or chordprobook normally — it runs inside
+the generated page, on whatever machine later opens it, not inside resources2crate. It
+re-implements the "is this a canonical song" check (`"text" in entity`) inline for the same
+reason. `test-songbook-html.mjs` calls `initSongbookApp` directly against a fake
+`document`/`window`, including simulating real clicks, as the one copy of this logic that's
+actually tested.
+
+## 11. Songbook HTML output — views and navigation
+
+The page has five top-level views, each shown by hiding all the others (`setHidden()`
+toggles a `hidden` class — **not** `element.style.display` directly: setting
+`style.display = ""` clears an inline override and falls back to whatever the stylesheet
+itself specifies, which for these elements is itself `display: none`; the `.hidden` CSS rule
+carries `!important` because `#menu-bar`'s own `display: flex` is a higher-specificity ID
+selector that would otherwise beat a plain class rule while both apply):
+
+| View | Shown by | Contains |
+|---|---|---|
+| `#list-view` | `showList()` | all songs (searchable, scrollable), a "Print this songbook" button, a "Setlists" button (hidden if the crate has none) |
+| `#setlist-index-view` | `showSetlistIndex()` | every setlist by name |
+| `#setlist-view` | `showSetlist(index)` | one setlist's entries: position, heading, match-status badge, notes, print/notes-toggle controls |
+| `#song-view` | `showSong(position)` | one song, with the sticky `#menu-bar` (title, key/capo/instrument selects, prev/next, print) |
+| `#print-view` | `enterPrintView()` | whatever's being printed (§12) |
+
+**A setlist becomes the active browsing context once opened.** `getActivePlaylist()`
+returns either every song (global browsing) or, when `currentSetlistIndex >= 0`, one
+setlist's own entries in setlist order, each carrying its own transpose/capo override where
+it has one, and never including an entry with no matching song. `showSong(position)` takes
+a position in *whichever* of these is active, not a raw song index — next/previous and
+their disabled state at either end are relative to that position. `currentSongIndex` (the
+resolved index into the global `songs` array) is separate state, resolved once by
+`showSong()`, so every other function that needs the actual song
+(`renderCurrentSong`/`showPrintSong`/`saveCurrentSelection`/the key-capo change handlers)
+reads it directly without knowing which playlist is active.
+
+`backToCurrentList()` returns to the setlist a song was opened from, if any, otherwise the
+global list — a setlist stays "the list" until the reader explicitly leaves it via
+`#back-from-setlist-index-button` (setlist index → global list) or
+`#back-from-setlist-button` (one setlist → setlist index).
+
+Clicking a setlist entry that resolved to a song opens that song with the entry's own
+transpose/capo override; the song view shows the **canonical song's own name**, never the
+entry's own display heading (they can differ — SPEC.md §6/§7).
+
+A non-exact match gets a specific, actionable message next to it (e.g. "matches more than
+one song — make this entry's heading more specific") rather than the bare status word — the
+only way to actually fix a mismatch is editing the `.setlist.md` file and rebuilding the
+crate, since this page cannot write back to the source folder (§2); the message says so.
+Styled as a bordered badge, not a colour — see §13's note on why colour is reserved for
+chord names.
+
+Notes are hidable with one toggle for the whole setlist (`#toggle-notes-button` flips
+`notesVisible` and re-renders every entry), not a control on every row.
+
+## 12. Songbook HTML output — features
+
+**Fit-to-window.** `fitTextToBox(element, availableHeight, availableWidth)` is a binary
+search over font-size (`FIT_MIN_FONT_PX`–`FIT_MAX_FONT_PX`, 10–80px) that finds the largest
+size at which `element.scrollHeight`/`scrollWidth` still fit the given box, used both
+on-screen (`fitSongContent`, against the viewport minus the menu bar's height, toggling a
+`two-columns` class when the available space is landscape-proportioned) and in print
+(`fitPrintSongPage`, §13). There is no CSS-only way to do this: font-size determines how
+much text wraps, which determines height, which is exactly what has to fit a box of known
+height — `clamp()`/container query units size from the container's own dimensions, not from
+how a given size makes a specific piece of text wrap. `fitSongContent` re-runs on window
+resize/orientation change, debounced 150ms.
+
+**Key/capo.** `#key-select`/`#capo-select` in the menu bar (`populateKeySelect`/
+`populateCapoSelect`). Choosing a key only ever changes which note it is, never switches
+major to minor or back. Choosing a key resets any capo choice to none. A song with no
+`{key}` directive gets a `+0`..`+11` semitone-offset dropdown instead of note names. Both
+are hidden entirely for a song with no chords at all (`ChordProSong.hasChords`). State
+(`currentTranspose`/`currentCapo`) resets to the song's own values on every song change
+unless a setlist entry override or a session-saved value (below) applies.
+
+**Instrument and chord grids.** `#instrument-select` (also mirrored as
+`#print-instrument-select` in the print banner — `setCurrentInstrument()` is the one place
+`currentInstrument` is assigned, keeping both in sync) drives `#chord-diagrams`, a side
+panel next to the song text populated per distinct chord `renderSong()`'s own `chordsUsed`
+reports. `currentInstrument` is global for the whole session, not per-song. A chord with no
+shape data for the chosen instrument is simply skipped (checked via
+`diagram.strings.length`, a fresh `ChordDiagram` instance per chord).
+
+**Session persistence.** Key/capo choices are saved to `sessionStorage` (not
+`localStorage` — forgotten when the tab closes), keyed by song id
+(`chordpro-songbook:key-capo`), wrapped in try/catch since `sessionStorage` access is known
+to throw under `file://` in some browsers/privacy modes.
+
+**Full screen.** `#fullscreen-button`, fixed at the top-left of the page (positioned below
+the sticky menu bar's own height, not at literal `(0, 0)`, so it doesn't sit on top of
+`#prev-song-button`) — a plain toggle against `document.documentElement.requestFullscreen()`/
+`document.exitFullscreen()`, label kept in sync via the `fullscreenchange` event. Hidden in
+`@media print` alongside `#print-banner`, since being fixed-position and always mounted
+means it would otherwise appear on the printed page itself.
+
+**Song search.** `#song-search` filters `#song-list`'s rows by case-insensitive substring
+match. Implemented over `Array.from(songListElement.children)`, not `.children.forEach`
+directly — a real element's `.children` is a live `HTMLCollection`, which has no `.forEach`
+(unlike `NodeList`, which does); the test suite's own fake DOM models `.children` as a plain
+array, which does have one, so this exact mistake will pass every test here while doing
+nothing in a real browser. `#song-list`/`#setlist-list` are both capped to
+`max-height: 60vh` with their own scroll, rather than growing the whole page taller.
+
+## 13. Songbook HTML output — print
+
+`#print-view` replaces the whole screen rather than opening `window.open()` in a new
+window — `window.open()` is blocked or silently does nothing in some contexts this
+standalone page may be opened from (SharePoint, Dropbox's own preview); `window.print()`
+itself prints whatever the *current* window shows, so no popup is needed. An on-screen
+banner (hidden in `@media print`) tells the reader to press Escape or click "Done printing"
+to return to the app; `exitPrintView()` returns to whichever of a song, a setlist, or the
+global list was open beforehand.
+
+Three entry points, each setting `currentPrintRebuild` (re-invocable with no arguments, so
+changing the instrument mid-preview via `#print-instrument-select` redraws the same job):
+
+- `showPrintSong()` — the one song currently open, `#print-song-button` (menu bar).
+- `showPrintBook()` — every song, `#print-book-button` (list view), each in its own key/capo
+  rather than whatever's selected on screen.
+- `showPrintSetlist(index)` — one setlist's own entries in setlist order,
+  `#print-setlist-button` (setlist view), each in that entry's own transpose/capo override.
+  An entry with no matching song has no page to print, so it's skipped from the song pages,
+  but stays on the contents page with "—" in place of a page number.
+
+**Page layout.** Every song is fitted onto exactly one A4 page via `fitPrintSongPage`
+(§12's `fitTextToBox`, against a fixed A4-sized box instead of the viewport) — not clipped.
+`.print-page`'s physical A4 sizing (width, padding) is applied unconditionally, **not**
+confined to `@media print`, so `fitPrintSongPage` can measure and fit against the page's
+real size immediately, before the reader ever asks to print; a size that only existed once
+print CSS took effect would be invisible to JS run beforehand. `@media print` itself only
+adds `page-break-after`, hides the on-screen banner/fullscreen button, and zeroes `@page`
+margins.
+
+> **Keep in sync by hand:** `PRINT_PAGE_PADDING_MM` (`songbook_html.js`, currently `10`) and
+> the `.print-page { padding: ... }` value in the `<style>` block must match exactly. They
+> can't share one source value — one lives inside `initSongbookApp`'s own embedded-via-
+> `.toString()` function body, the other in a separate template string in
+> `renderSongbookHtml` — so changing one without the other silently breaks
+> `fitPrintSongPage`'s available-space calculation.
+
+**Front matter.** `buildFrontMatterPages(titleText, entries)` produces the title + contents
+page(s): one combined page (title, an optional "With chords for [instrument]" subtitle when
+one is selected, and the contents list) for up to `TOC_SPLIT_THRESHOLD` (50) entries; above
+that, the contents list splits into `Math.ceil(entryCount / TOC_ENTRIES_PER_PAGE)` pages of
+`TOC_ENTRIES_PER_PAGE` (50) entries each, headed "Contents (i/N)", title/subtitle only on
+the first. `frontMatterPageCount(entryCount)` computes the same page count independently,
+since every song's own page number has to be known before any page is actually built.
+
+**Page numbers.** Every page — front matter or song — carries its own number
+(`.print-page-number`, absolutely positioned in a corner, so it never affects
+`fitPrintSongPage`'s own height measurement). `showPrintSong()` (no book context) omits one.
+
+**Chord grids in print.** `buildChordDiagramElements()` (the same logic the on-screen
+`#chord-diagrams` panel uses) is called by `buildSongPrintPage` too, laid out as a side
+panel next to the song text — its width comes out of the song body's own `clientWidth` once
+laid out, so `fitPrintSongPage` doesn't need to subtract it. A song that actually got at
+least one diagram also gets a small "Chords for [instrument]" note under its own title
+(`.print-chords-for-note`), independent of whether the book-level subtitle is showing, since
+not every song is guaranteed a shape for every chord it uses; both notes' rendered heights
+are subtracted from `fitPrintSongPage`'s own budget.
+
+## 14. Visual design
+
+High contrast: plain black-on-white (white-on-black under `prefers-color-scheme: dark`).
+**Red (`--chord`) is reserved exclusively for chord names** — every other control (buttons,
+borders, the menu bar, match-status badges) uses black/white rather than a colour of its
+own, so red stays a single, unambiguous marker. Chorus/bridge passages and tab blocks are
+set off by a border rule, never a background tint — no filled panel sits behind any text
+anywhere on the page. Song text is serif; UI chrome (buttons, the menu bar) is a plain sans.
+
+**Not yet built:** a hide-chords toggle, Nashville-number display, or any further style
+controls beyond what's listed in §12.

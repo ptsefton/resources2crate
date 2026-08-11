@@ -1,10 +1,11 @@
-// Unit tests for parseSetlist and matchEntryToSong
-// (src/plugins/chordpro-input/lib/Setlist.js) — see SPEC.md §6/§6.1.
+// Unit tests for parseSetlist and matchEntryToSong, now sourced from the
+// chordprobook package (see its own SPEC.md §3.2) rather than a local copy
+// — see this plugin's SPEC.md §6/§6.1 for the design.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseSetlist, matchEntryToSong } from "./lib/Setlist.js";
+import { parseSetlist, matchEntryToSong } from "chordprobook";
 
 const fixturesDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "samples");
 const readFixture = (name) => readFileSync(path.join(fixturesDir, name), "utf8");
@@ -202,7 +203,7 @@ const songs = [
 /* ---------- end to end against the real sample setlist + real songs ---------- */
 
 {
-  const { ChordProSong } = await import("./lib/ChordProSong.js");
+  const { ChordProSong } = await import("chordprobook");
   const songFiles = [
     "AmazingGrace.cho.txt", "gimme_a_u.cho.txt", "i_called_your_name.cho.txt",
     "slot_machine_baby.cho.txt", "ukulele_train.cho.txt", "uni-verse.cho.txt",

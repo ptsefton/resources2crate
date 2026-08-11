@@ -128,8 +128,8 @@ assert.deepEqual(
 );
 assert.deepEqual(
   pluginsTapping(HOOKS.OUTPUT_WRITE),
-  ["ro-crate-json-output", "ro-crate-xlsx-output", "ro-crate-html-output"],
-  "outputs must be written JSON, then xlsx, then HTML"
+  ["ro-crate-json-output", "ro-crate-xlsx-output", "ro-crate-html-output", "chordpro-songbook-html-output"],
+  "outputs must be written JSON, then xlsx, then HTML, then the chordpro-mode-only songbook page (which reads the just-written JSON)"
 );
 assert.deepEqual(
   pluginsTapping(HOOKS.CRATE_VALIDATE),

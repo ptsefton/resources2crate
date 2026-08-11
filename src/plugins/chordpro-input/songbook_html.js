@@ -1,0 +1,1760 @@
+// Replicates chordprosite's output shape — a standalone HTML page carrying
+// both the song data and the code that displays it, rendered client-side,
+// not chordprosite's own implementation of that shape (concatenating its
+// own source files as text; see chordprobook's own SPEC.md §1) — from the
+// RO-Crate the chordpro-input plugin already built. See SPEC.md's
+// "Songbook HTML output" and "UI" sections for the incremental plan this
+// is a step of and for the navigation design this step adds: a clickable
+// song list, a song view rendered with chordprobook's own renderSong(), a
+// menu bar back to the list, and next/previous buttons at opposite screen
+// edges.
+//
+// A separate plugin object from chordpro-input's own `plugin` (index.js) —
+// deliberately: that one is registered in INPUT_PLUGINS (mutually
+// exclusive, dispatched on ctx.options.inputMode); this one is registered
+// in PLUGINS (additive, every entry's hooks run), tapping OUTPUT_WRITE
+// alongside ro-crate-json-output/xlsx-output/html-output. Colocated in this
+// same folder rather than a separate plugin directory since it only makes
+// sense for, and only ever runs after, a chordpro-mode build.
+//
+// Reads the ro-crate-metadata.json this same build already wrote (via
+// crate_index.js, not the `ro-crate` library — see that file's own header)
+// rather than reaching into ctx.crate directly: a future standalone
+// site-compiler will only ever have that written file to work from, not a
+// live crate object, so building this against the same interface now keeps
+// this code close to what that compiler will actually need. crate_index.js
+// is used here only to count songs for the build log — the page's own
+// client-side rendering (below) does not use it.
+import { HOOKS } from "../hooks.js";
+import { readJsonFromFolder, writeFile, fileExists } from "../../fs_helpers.js";
+import { buildCrateIndex, entitiesOfType } from "./crate_index.js";
+import {
+  CHORDPROBOOK_BROWSER_BUNDLE,
+  CHORDPROBOOK_INSTRUMENTS_DATA,
+  CHORDPROBOOK_CHORD_DATA,
+} from "./generated/chordprobook_browser_bundle.js";
+
+const CRATE_FILE = "ro-crate-metadata.json";
+const OUTPUT_FILE = "songbook.html";
+
+// A canonical Song entity, not a setlist-entry proxy — both are typed
+// MusicComposition (chordpro-input's own SPEC.md §7), told apart by
+// whether "text" is present, exactly as that plugin's own tests do. Used
+// only for the build-log song count (see the module comment above) — the
+// embedded client-side app (below) re-expresses this same test itself,
+// inline, since it cannot import this function into the page.
+function isCanonicalSong(entity) {
+  return "text" in entity;
+}
+
+// Guards against a literal "</script" inside the embedded JSON (e.g. in a
+// song's own title or text) closing the <script> element early — the one
+// thing embedding arbitrary JSON as literal text in HTML has to defend
+// against, regardless of the script's `type`.
+function escapeForInlineScript(jsonText) {
+  return jsonText.replace(/<\/script/gi, "<\\/script");
+}
+
+// The page's whole client-side app: renders the song list, and switches to
+// a song view — rendered with chordprobook's own ChordProSong/renderSong/
+// Transposer/ChordDiagram, all four bare globals here because they're
+// defined by CHORDPROBOOK_BROWSER_BUNDLE, concatenated into the page
+// immediately before this function's own source (see renderSongbookHtml
+// below and scripts/bundle-chordprobook-for-browser.mjs for why that has to
+// be a build-time-generated bundle rather than a normal import) — on click,
+// with a menu bar back to the list, next/previous buttons, key/capo
+// dropdowns that re-render the current song transposed, and an instrument
+// select that shows chord grids for whatever the song uses.
+//
+// Deliberately a plain function, taking `document`/`window` as parameters
+// rather than reading the globals — embedded into the page via `.toString()`
+// so there is exactly one copy of this logic to keep correct, not a
+// hand-written string duplicating it; the parameters are what make it
+// callable directly from a test with a fake `document`/`window`, and what
+// the embedded call site passes the real ones to. `setTimeout`/`clearTimeout`
+// (used by the resize handling below) are read as true globals rather than
+// added as parameters for the same reason `Math`/`JSON` are not: they exist
+// identically under Node and in a browser, so there is nothing environment-
+// specific to inject.
+//
+// Deliberately self-contained: it must not reference anything from this
+// module's own scope (imports, other functions here) — none of that exists
+// any more once this function's source is the only part of the file that
+// ends up in the page. It re-implements the "is this a canonical song"
+// check inline for the same reason, rather than importing crate_index.js's
+// equivalent.
+export function initSongbookApp(document, window) {
+  const crate = JSON.parse(document.getElementById("crate-data").textContent);
+  const graph = Array.isArray(crate["@graph"]) ? crate["@graph"] : [];
+  const asArray = (value) => (value === undefined || value === null ? [] : Array.isArray(value) ? value : [value]);
+
+  const songs = graph
+    .filter((entity) => asArray(entity["@type"]).includes("MusicComposition") && "text" in entity)
+    .map((entity) => ({ id: entity["@id"], name: String(asArray(entity.name)[0] || entity["@id"]), text: entity.text }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  // Setlist-entry proxies (SPEC.md §7): MusicComposition entities with no
+  // "text" of their own — the same test isCanonicalSong/the songs filter
+  // above uses, from the other side. songIndex resolves specializationOf
+  // to a position in `songs` once, here, rather than re-searching it every
+  // time an entry is rendered or clicked; -1 for an entry matchEntryToSong
+  // (chordpro_crate.js, build time) never resolved to a real song at all.
+  const entriesById = {};
+  for (const entity of graph) {
+    if (!asArray(entity["@type"]).includes("MusicComposition") || "text" in entity) continue;
+    const songId = entity.specializationOf && entity.specializationOf["@id"];
+    entriesById[entity["@id"]] = {
+      name: String(asArray(entity.name)[0] || entity["@id"]),
+      setName: entity["custom:setName"] || "",
+      matchStatus: entity["custom:matchStatus"] || "unresolved",
+      notes: entity.description || "",
+      transpose: entity["custom:transpose"],
+      capo: Number.isInteger(entity["custom:capo"]) ? entity["custom:capo"] : undefined,
+      songIndex: songId ? songs.findIndex((song) => song.id === songId) : -1,
+    };
+  }
+
+  const setlists = graph
+    .filter((entity) => asArray(entity["@type"]).includes("MusicPlaylist"))
+    .map((entity) => ({
+      name: String(asArray(entity.name)[0] || entity["@id"]),
+      entries: asArray(entity.hasPart)
+        .map((ref) => entriesById[ref["@id"]])
+        .filter(Boolean),
+    }));
+
+  const listView = document.getElementById("list-view");
+  const songView = document.getElementById("song-view");
+  const menuBar = document.getElementById("menu-bar");
+  const songViewTitle = document.getElementById("song-view-title");
+  const songContent = document.getElementById("song-content");
+  const songListElement = document.getElementById("song-list");
+  const prevButton = document.getElementById("prev-song-button");
+  const nextButton = document.getElementById("next-song-button");
+  const backButton = document.getElementById("back-to-list-button");
+  const keySelect = document.getElementById("key-select");
+  const capoSelect = document.getElementById("capo-select");
+  const instrumentSelect = document.getElementById("instrument-select");
+  const chordDiagramsPanel = document.getElementById("chord-diagrams");
+  const printSongButton = document.getElementById("print-song-button");
+  const printBookButton = document.getElementById("print-book-button");
+  const printView = document.getElementById("print-view");
+  const printContent = document.getElementById("print-content");
+  const printNowButton = document.getElementById("print-now-button");
+  const donePrintingButton = document.getElementById("done-printing-button");
+  const printInstrumentSelect = document.getElementById("print-instrument-select");
+  const fullscreenButton = document.getElementById("fullscreen-button");
+  const viewSetlistsButton = document.getElementById("view-setlists-button");
+  const setlistIndexView = document.getElementById("setlist-index-view");
+  const backFromSetlistIndexButton = document.getElementById("back-from-setlist-index-button");
+  const setlistListElement = document.getElementById("setlist-list");
+  const setlistView = document.getElementById("setlist-view");
+  const setlistViewTitle = document.getElementById("setlist-view-title");
+  const backFromSetlistButton = document.getElementById("back-from-setlist-button");
+  const printSetlistButton = document.getElementById("print-setlist-button");
+  const toggleNotesButton = document.getElementById("toggle-notes-button");
+  const setlistEntriesElement = document.getElementById("setlist-entries");
+  const songSearchInput = document.getElementById("song-search");
+
+  // currentIndex: position within getActivePlaylist() (below) — the
+  // global song list while browsing it, but a specific setlist's own
+  // order once one is active (currentSetlistIndex >= 0), which is not
+  // necessarily the same as a raw index into `songs`. currentSongIndex is
+  // that raw index, resolved once by showSong() at the same time it sets
+  // currentIndex, so every other function that needs the actual song
+  // (renderCurrentSong, showPrintSong, saveCurrentSelection, the key/capo
+  // change handlers) reads it directly rather than re-deriving it from
+  // the active playlist itself each time.
+  let currentIndex = -1;
+  let currentSongIndex = -1;
+  // Which instrument's chord grids to show, or null for none — global for
+  // the whole viewing session rather than per-song like currentTranspose/
+  // currentCapo: which instrument PT is holding doesn't change from one
+  // song to the next the way a song's own key does, so it isn't reset in
+  // showSong() and isn't part of the per-song sessionStorage record either.
+  let currentInstrument = null;
+  // null in either means "use the song's own {key}/{transpose}/{capo}
+  // directives, untouched". showSong sets these from whatever's saved for
+  // that song's id (see loadSavedSelection below), defaulting to null when
+  // nothing is saved yet — so a song that's never been touched still opens
+  // at its own values.
+  let currentTranspose = null;
+  let currentCapo = null;
+  let currentSetlistIndex = -1;
+  // Whether notes render at all, not per-entry — a single toggle for the
+  // whole setlist rather than a control on every row, matching PT's own
+  // ask ("make them hidable") for a capability, not a per-entry UI.
+  let notesVisible = true;
+  // Whichever showPrintSong/showPrintBook/showPrintSetlist call is
+  // currently on screen, re-invocable with no arguments — set at the start
+  // of each of those functions. Changing the instrument from
+  // #print-instrument-select calls this to redraw the same print job with
+  // the new instrument's chord grids, rather than needing to leave print
+  // preview and re-click print to see the effect.
+  let currentPrintRebuild = null;
+
+  // Session persistence for the key/capo choice — chordprosite's own
+  // equivalent is a "Remember key, capo for this playlist" checkbox
+  // (template.njk), checked by default, that writes into the playlist data
+  // itself; this uses sessionStorage instead, scoped to this browser tab
+  // rather than to a file this page has no way to write back to (SPEC.md
+  // §2 rules out editing/writing to the source folder entirely — this page
+  // only ever reads the crate embedded in it). "Session" is deliberately
+  // sessionStorage, not localStorage: closing the tab forgets the choice,
+  // matching what PT actually asked for ("remember changes for a session")
+  // rather than a choice that outlives the browsing session and lingers
+  // indefinitely against a page that may be reopened from an entirely
+  // different folder later.
+  //
+  // Wrapped in try/catch — not defensive programming against a
+  // hypothetical, but a real, known failure mode specific to this page's
+  // own deployment target: SPEC.md's own "Songbook HTML output" section
+  // requires this to work opened directly as a file:// URL, and
+  // sessionStorage access can throw under file:// in some browsers/privacy
+  // modes rather than simply being unavailable. Losing persistence there is
+  // an acceptable degradation; losing the whole page is not.
+  const SELECTIONS_STORAGE_KEY = "chordpro-songbook:key-capo";
+
+  function loadSavedSelections() {
+    try {
+      const raw = window.sessionStorage.getItem(SELECTIONS_STORAGE_KEY);
+      return raw ? JSON.parse(raw) : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function saveCurrentSelection() {
+    const song = songs[currentSongIndex];
+    if (!song) return;
+    try {
+      const all = loadSavedSelections();
+      all[song.id] = { transpose: currentTranspose, capo: currentCapo };
+      window.sessionStorage.setItem(SELECTIONS_STORAGE_KEY, JSON.stringify(all));
+    } catch {
+      // Choice still works for as long as this song stays open (see above)
+      // — it just won't survive navigating away and back.
+    }
+  }
+
+  // Toggling a "hidden" class, not element.style.display directly: setting
+  // style.display = "" *clears* an inline override rather than making the
+  // element visible again — it then falls back to whatever the stylesheet
+  // itself says, which for #song-view/#menu-bar/etc. is still `display:
+  // none` (see the <style> block in renderSongbookHtml). That was a real
+  // bug here, not a hypothetical one — both views ended up hidden after
+  // clicking a song, which is exactly "blank". classList avoids it: an
+  // element with no "hidden" class simply gets its own normal display value
+  // from the stylesheet, whatever that is per element, rather than this
+  // function needing to know or hardcode it.
+  function setHidden(element, hidden) {
+    element.classList.toggle("hidden", hidden);
+  }
+
+  function isHidden(element) {
+    return element.classList.contains("hidden");
+  }
+
+  // Key/capo controls — ported from chordprosite's own makeKeyDropdown()/
+  // makeCapoDropdown() (scripts.js), including their one real quirk worth
+  // keeping deliberately: choosing a key only ever changes which note it
+  // is, never switching a minor key to major or back — chordprosite's own
+  // dropdown is built from `Transposer.notes` with a fixed `m` suffix
+  // decided once, from the song's own original key, not offered as a
+  // choice. Both selects are populated fresh on every render (a song
+  // opening, or either dropdown changing) rather than built once, since
+  // what belongs in them — which note is "selected", what each capo
+  // option's shape-key label reads — depends on currentTranspose/
+  // currentCapo, which change on every render.
+  //
+  // Transposer: a third bare global from CHORDPROBOOK_BROWSER_BUNDLE,
+  // alongside ChordProSong/renderSong (see this function's own header
+  // comment) — needed here for its `notes` table and `transposeKey()`,
+  // not for chord transposition itself, which renderSong already does.
+  function populateKeySelect(parsedSong) {
+    if (!parsedSong.hasChords) {
+      setHidden(keySelect, true);
+      keySelect.replaceChildren();
+      return;
+    }
+    setHidden(keySelect, false);
+    keySelect.replaceChildren();
+
+    if (parsedSong.key) {
+      const minor = parsedSong.key.endsWith("m");
+      const soundingKey = currentTranspose ?? parsedSong.key;
+      for (const note of Transposer.notes) {
+        const value = minor ? `${note}m` : note;
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = value;
+        if (value === soundingKey) option.selected = true;
+        keySelect.appendChild(option);
+      }
+    } else {
+      // No {key} directive at all — chordprosite's own "originalKey ===
+      // null" branch: a plain semitone-offset dropdown, since there's no
+      // note name to offer choices around.
+      const soundingOffset = currentTranspose ?? 0;
+      Transposer.notes.forEach((_, index) => {
+        const option = document.createElement("option");
+        option.value = String(index);
+        option.textContent = `+${index}`;
+        if (index === soundingOffset) option.selected = true;
+        keySelect.appendChild(option);
+      });
+    }
+  }
+
+  function populateCapoSelect(parsedSong) {
+    if (!parsedSong.hasChords) {
+      setHidden(capoSelect, true);
+      capoSelect.replaceChildren();
+      return;
+    }
+    setHidden(capoSelect, false);
+    capoSelect.replaceChildren();
+
+    const soundingKey = parsedSong.key
+      ? (typeof currentTranspose === "string" ? currentTranspose : parsedSong.key)
+      : null;
+    const capo = currentCapo ?? parsedSong.capo ?? 0;
+
+    const noCapoOption = document.createElement("option");
+    noCapoOption.value = "";
+    noCapoOption.textContent = "0 - No Capo";
+    if (capo === 0) noCapoOption.selected = true;
+    capoSelect.appendChild(noCapoOption);
+
+    for (let i = 1; i <= 12; i += 1) {
+      const option = document.createElement("option");
+      option.value = String(i);
+      // chordprosite's own label formula (Transposer.transposeKey(song.key,
+      // -i)) is used verbatim here — but chordprosite calls it even when
+      // there's no key at all, at which point transposeKey(null, ...)
+      // returns null and the label reads "i - (null shapes)". `soundingKey`
+      // being null skips that: a plain "Capo i" with no shapes claim, since
+      // there's no key to derive one from and "null shapes" isn't a real
+      // answer worth reproducing.
+      option.textContent = soundingKey ? `${i} - (${Transposer.transposeKey(soundingKey, -i)} shapes)` : `Capo ${i}`;
+      if (i === capo) option.selected = true;
+      capoSelect.appendChild(option);
+    }
+  }
+
+  // Instrument list — built once, not per-song: it's the same list
+  // regardless of which song is open, unlike the key/capo selects, which
+  // depend on the current song's own key and chord content.
+  // Takes the select to populate as a parameter — there are two of these
+  // now (the menu bar's own #instrument-select, and #print-instrument-select
+  // in the print banner, added so the choice can be made/changed without
+  // leaving print preview to go find a song first), both listing the exact
+  // same instruments.
+  function populateInstrumentSelect(select) {
+    const noneOption = document.createElement("option");
+    noneOption.value = "";
+    noneOption.textContent = "No chord grids";
+    noneOption.selected = true;
+    select.appendChild(noneOption);
+
+    for (const instrument of CHORDPROBOOK_INSTRUMENTS_DATA) {
+      const option = document.createElement("option");
+      option.value = instrument.name;
+      option.textContent = instrument.name;
+      select.appendChild(option);
+    }
+  }
+
+  // The two instrument selects (menu bar, print banner) always agree —
+  // this is the one place currentInstrument is actually assigned, so
+  // nothing can set it without keeping both in sync.
+  function setCurrentInstrument(name) {
+    currentInstrument = name || null;
+    instrumentSelect.value = currentInstrument || "";
+    printInstrumentSelect.value = currentInstrument || "";
+  }
+
+  // Chord grids for the instrument currently selected, one per distinct
+  // chord the song actually uses (`chordsUsed`, already computed by
+  // renderSong — not recomputed here). Ported from chordprosite's own
+  // addChordsToDiv()/drawChordForInstrument() (template.njk/ChordDiagram.js),
+  // with one deliberate change: a fresh ChordDiagram instance per chord,
+  // not chordprosite's single reused instance/canvas. That matters for a
+  // chord with no shape data for the chosen instrument — chordprosite's
+  // drawChordForInstrument() simply does nothing when it can't find a
+  // definition, leaving whatever the previous chord in the loop last drew
+  // still on the shared canvas, mislabelled as the chord that just failed
+  // to find a shape. A fresh instance per chord can't inherit a previous
+  // chord's drawing; it just has nothing to render, which this skips
+  // instead of showing (checking `diagram.strings.length` — parseDefinition,
+  // called by drawChordForInstrument only when a definition was actually
+  // found, is what populates it).
+  // Shared between the on-screen chord panel (renderChordDiagrams) and
+  // print pages (buildSongPrintPage) — printing "needs to add chord grids
+  // if the user has selected that" (PT), the same instrument choice either
+  // way, since it's global for the session (currentInstrument's own
+  // declaration above), not a separate on-screen/print setting.
+  function buildChordDiagramElements(chordsUsed) {
+    const instrument = currentInstrument
+      ? CHORDPROBOOK_INSTRUMENTS_DATA.find((candidate) => candidate.name === currentInstrument)
+      : null;
+    if (!instrument) return [];
+
+    const diagramElements = [];
+    for (const chordName of chordsUsed) {
+      // ChordDiagram: a fourth bare global from CHORDPROBOOK_BROWSER_BUNDLE
+      // (see this function's own header comment above), alongside
+      // ChordProSong/renderSong/Transposer.
+      const diagram = new ChordDiagram(chordName);
+      diagram.loadDefinitionData(CHORDPROBOOK_CHORD_DATA);
+      diagram.drawChordForInstrument(instrument, chordName);
+      if (diagram.strings.length) {
+        const wrapper = document.createElement("div");
+        wrapper.innerHTML = diagram.toSvg();
+        diagramElements.push(wrapper);
+      }
+    }
+    return diagramElements;
+  }
+
+  function renderChordDiagrams(chordsUsed) {
+    const diagramElements = buildChordDiagramElements(chordsUsed);
+    if (!diagramElements.length) {
+      setHidden(chordDiagramsPanel, true);
+      chordDiagramsPanel.replaceChildren();
+      return;
+    }
+    chordDiagramsPanel.replaceChildren(...diagramElements);
+    setHidden(chordDiagramsPanel, false);
+  }
+
+  function renderCurrentSong() {
+    const song = songs[currentSongIndex];
+    // ChordProSong/renderSong: bare globals from CHORDPROBOOK_BROWSER_BUNDLE
+    // (see this function's own header comment above).
+    const parsedSong = new ChordProSong(song.text);
+    const rendered = renderSong(parsedSong, song.text, { transpose: currentTranspose, capo: currentCapo });
+
+    songContent.innerHTML = rendered.pages.join("\n");
+    populateKeySelect(parsedSong);
+    populateCapoSelect(parsedSong);
+    setHidden(instrumentSelect, !parsedSong.hasChords);
+    renderChordDiagrams(parsedSong.hasChords ? rendered.chordsUsed : []);
+    fitSongContent();
+  }
+
+  // Scaling song text to fill the available screen — ported from
+  // chordprosite's own fillPage()/fillPages() (template.njk), which PT
+  // named as the feature this whole page is really for. There is still no
+  // CSS-only way to do this: font-size determines how much text wraps,
+  // which determines how tall the content becomes, which is exactly what
+  // has to fit inside a box of known height — content-dependent in a way
+  // clamp()/container query units can't express, since those size a font
+  // from the container's own dimensions, never from how much a given size
+  // makes a specific piece of text wrap. Measuring the rendered result and
+  // adjusting is still the only way to do this, as it was when chordprosite
+  // was last touched.
+  //
+  // Two deliberate departures from chordprosite's own version, not a
+  // like-for-like port: a binary search over font-size in place of its
+  // 1px-at-a-time decrement loop (the same handful of comparisons chosen
+  // well, rather than up to 3000 of them run blindly — chordprosite's own
+  // loop caps itself at exactly that many iterations, which is the tell),
+  // and an explicit floor (FIT_MIN_FONT_PX) — chordprosite's loop has none,
+  // and for content that cannot fit at all keeps decrementing the font
+  // size toward zero and past it into invalid negative values, which is not
+  // a fit, just an unbounded search for one.
+  const FIT_MIN_FONT_PX = 10;
+  const FIT_MAX_FONT_PX = 80;
+
+  // The binary search itself, factored out of fitSongContent so print mode
+  // (below) can fit a song onto its own printed page the same way —
+  // PT: chordprosite doesn't clip a song that's too long for one page, it
+  // resizes it to fit, the same fillPage() the on-screen view uses. An
+  // earlier version of this print feature let a long song spill onto a
+  // second physical page instead, on the mistaken belief that chordprosite
+  // clips; it doesn't, so this doesn't either.
+  function fitTextToBox(element, availableHeight, availableWidth) {
+    let low = FIT_MIN_FONT_PX;
+    let high = FIT_MAX_FONT_PX;
+    let bestFit = FIT_MIN_FONT_PX;
+    while (low <= high) {
+      const mid = Math.floor((low + high) / 2);
+      element.style.fontSize = `${mid}px`;
+      const fits = element.scrollHeight <= availableHeight && element.scrollWidth <= availableWidth;
+      if (fits) {
+        bestFit = mid;
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+    element.style.fontSize = `${bestFit}px`;
+  }
+
+  function fitSongContent() {
+    if (currentIndex < 0) return;
+
+    const availableHeight = window.innerHeight - menuBar.offsetHeight;
+    const availableWidth = songContent.clientWidth;
+
+    // Landscape-proportioned space — more available width than height —
+    // gets two columns, the same trigger chordprosite itself uses. Decided
+    // before the search below, since it changes how the same font size
+    // wraps: a column layout roughly halves the height a given amount of
+    // text needs, so column count has to be settled first, not fitted
+    // around afterwards.
+    songContent.classList.toggle("two-columns", availableHeight < availableWidth);
+    fitTextToBox(songContent, availableHeight, availableWidth);
+  }
+
+  // chordprosite registers this same idea (`window.addEventListener('resize',
+  // fillPages(songDiv))`) but calls fillPages immediately and passes its
+  // (undefined) return value as the listener — a real bug, found by reading
+  // that line rather than by running it: it re-fits once at load and never
+  // again on an actual resize or rotation. Debounced here (150ms) since
+  // resize fires continuously while a window is being dragged, and each
+  // call re-measures and re-searches.
+  let resizeTimer = null;
+  function scheduleFit() {
+    if (resizeTimer !== null) clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(fitSongContent, 150);
+  }
+  window.addEventListener("resize", scheduleFit);
+  window.addEventListener("orientationchange", scheduleFit);
+
+  // Print mode — ported from chordprosite's own displayPrint()/printSong()
+  // (template.njk), with the one change PT specifically asked for: this
+  // replaces the current screen (a third top-level view, alongside list and
+  // song) rather than opening `window.open('', '_blank')` — that call is
+  // blocked or silently no-ops in some contexts a standalone HTML page like
+  // this one may be opened from (SharePoint, Dropbox's own preview), which
+  // is the actual bug report this responds to. window.print() itself,
+  // unlike window.open(), prints whatever the *current* window is showing,
+  // which is why replacing the screen is enough — no popup is needed at all.
+  //
+  // Every song gets exactly one physical page, same as chordprosite's own
+  // version: not by clipping it (chordprosite doesn't do that either — an
+  // earlier version of this feature assumed it did, and let a long song
+  // spill onto a second page instead, which was simply a misreading of the
+  // original), but by fitting it to the page with the exact same
+  // fitTextToBox() the on-screen view uses, applied to a fixed A4-sized box
+  // instead of the viewport. That's also what makes the table of contents'
+  // page numbers below trustworthy: they're only knowable at all because
+  // every song is guaranteed to land on exactly one page.
+  //
+  // .print-page's own physical sizing (width/padding, below in the <style>
+  // block) is deliberately not confined to @media print — chordprosite's
+  // own popup-window version applies it unconditionally too, which is what
+  // lets fitPrintSongPage measure real A4-sized boxes immediately, before
+  // the user ever asks to print, rather than only once print CSS is
+  // actually in effect (which JS run beforehand can't observe at all).
+  const MM_PER_PX = 25.4 / 96; // CSS reference pixel: 1in = 96px = 25.4mm
+  const A4_WIDTH_MM = 210;
+  const A4_HEIGHT_MM = 297;
+  // Tightened from chordprosite's own 15mm (PT: "make the printed pages a
+  // bit tighter... we want the largest possible print for stage use and
+  // visually impaired colleagues") — this number has to match the
+  // .print-page padding declared in the <style> block in renderSongbookHtml
+  // below exactly; the two can't share one source value the way the rest
+  // of this file avoids duplication, since that block is a different
+  // function's own string template, not something this function's code can
+  // reach into.
+  const PRINT_PAGE_PADDING_MM = 10;
+  const PRINT_CONTENT_WIDTH_PX = (A4_WIDTH_MM - PRINT_PAGE_PADDING_MM * 2) / MM_PER_PX;
+  const PRINT_CONTENT_HEIGHT_PX = (A4_HEIGHT_MM - PRINT_PAGE_PADDING_MM * 2) / MM_PER_PX;
+
+  function addPageNumber(page, pageNumber) {
+    const label = document.createElement("div");
+    label.className = "print-page-number";
+    label.textContent = String(pageNumber);
+    page.appendChild(label);
+  }
+
+  // Returns the page element; the title/body elements fitPrintSongPage
+  // needs are reached via printSongTitleElement/printSongBody, plain
+  // properties set directly on it rather than a querySelector lookup —
+  // this is an element only this module's own code ever looks back into.
+  // Chord grids (print-chord-diagrams), alongside the body rather than
+  // above it — same reasoning as the on-screen #chord-diagrams side panel
+  // (SPEC.md §10): a side panel's width comes out of the body's own
+  // clientWidth for free once laid out, without fitPrintSongPage needing to
+  // know the panel exists or subtract its width itself.
+  //
+  // A small "Chords for X" note under the song's own title, when this
+  // particular song actually got at least one diagram — PT: a single
+  // printed page, out of context from the rest of the book (photocopied,
+  // handed to one musician), should still say what instrument its own
+  // chord shapes are for. Checked per song, unlike the front-matter page's
+  // broader statement (buildFrontMatterPages, below), since not every song
+  // is guaranteed to have a shape for every chord it uses.
+  //
+  // pageNumber (null by default) is only given by showPrintBook/
+  // showPrintSetlist — a standalone single-song print (showPrintSong) has
+  // no book/contents page for a number to refer back to, so it omits one
+  // rather than printing a lone, meaningless "1".
+  function buildSongPrintPage(name, rendered, pageNumber = null) {
+    const page = document.createElement("div");
+    page.className = "print-page";
+    const heading = document.createElement("h1");
+    heading.className = "print-song-title";
+    heading.textContent = name;
+    page.appendChild(heading);
+
+    const row = document.createElement("div");
+    row.className = "print-song-row";
+    const body = document.createElement("div");
+    body.className = "print-song-body";
+    body.innerHTML = rendered.pages.join("\n");
+    row.appendChild(body);
+
+    const diagramElements = buildChordDiagramElements(rendered.chordsUsed);
+    let chordsForNote = null;
+    if (diagramElements.length) {
+      chordsForNote = document.createElement("p");
+      chordsForNote.className = "print-chords-for-note";
+      chordsForNote.textContent = `Chords for ${currentInstrument}`;
+      page.appendChild(chordsForNote);
+
+      const diagrams = document.createElement("div");
+      diagrams.className = "print-chord-diagrams";
+      diagrams.replaceChildren(...diagramElements);
+      row.appendChild(diagrams);
+    }
+
+    page.appendChild(row);
+    if (pageNumber !== null) addPageNumber(page, pageNumber);
+    page.printSongTitleElement = heading;
+    page.printChordsForNoteElement = chordsForNote;
+    page.printSongBody = body;
+    return page;
+  }
+
+  // Only meaningful once `page` is actually attached and visible (see
+  // enterPrintView()'s own ordering below) — scrollHeight/offsetHeight/
+  // clientWidth are 0 for anything still inside a display:none ancestor,
+  // same reason showSong() toggles visibility before calling
+  // fitSongContent(). Width comes from printSongBody's own clientWidth,
+  // not the fixed PRINT_CONTENT_WIDTH_PX constant directly — the same
+  // change fitSongContent's own on-screen version already made for the
+  // same reason: a visible chord-diagrams panel (above) already narrows
+  // it, and measuring rather than assuming means this doesn't need its
+  // own copy of that arithmetic. The page number itself never needs
+  // subtracting here — it's position:absolute, so it never takes up flow
+  // space the way the title/chords-for note do.
+  function fitPrintSongPage(page) {
+    const chordsForHeight = page.printChordsForNoteElement ? page.printChordsForNoteElement.offsetHeight : 0;
+    const availableHeight = PRINT_CONTENT_HEIGHT_PX - page.printSongTitleElement.offsetHeight - chordsForHeight;
+    fitTextToBox(page.printSongBody, availableHeight, page.printSongBody.clientWidth);
+  }
+
+  function enterPrintView() {
+    setHidden(listView, true);
+    setHidden(songView, true);
+    setHidden(menuBar, true);
+    setHidden(setlistView, true);
+    setHidden(setlistIndexView, true);
+    setHidden(printView, false);
+    printInstrumentSelect.value = currentInstrument || "";
+  }
+
+  // Returns to whichever view was showing before print mode — the song or
+  // setlist being viewed, if either, otherwise the list. Reuses
+  // showSong()/showSetlist()/showList() directly rather than tracking a
+  // separate "what to return to" flag: currentIndex/currentSetlistIndex
+  // already record that, untouched by anything print mode does (both
+  // showSong() and showSetlist() do reset the *other* one when entering,
+  // which is exactly why checking currentIndex first here is safe — it's
+  // never left over from before print mode was entered).
+  function exitPrintView() {
+    if (currentIndex >= 0) showSong(currentIndex);
+    else if (currentSetlistIndex >= 0) showSetlist(currentSetlistIndex);
+    else showList();
+  }
+
+  function showPrintSong() {
+    const song = songs[currentSongIndex];
+    if (!song) return;
+    currentPrintRebuild = showPrintSong;
+    // ChordProSong/renderSong: bare globals from CHORDPROBOOK_BROWSER_BUNDLE
+    // (see this function's own header comment above).
+    const parsedSong = new ChordProSong(song.text);
+    const rendered = renderSong(parsedSong, song.text, { transpose: currentTranspose, capo: currentCapo });
+    const page = buildSongPrintPage(song.name, rendered);
+    printContent.replaceChildren(page);
+    enterPrintView();
+    fitPrintSongPage(page);
+  }
+
+  // Title + contents share one page (PT: "put the songbook title and TOC
+  // on the same page") — unless there are enough entries that they
+  // shouldn't: "if the number of pages goes over about 50 then use
+  // multiple pages for the toc and put page numbers on the pages as well."
+  // Read literally as a threshold on entry count (which is what actually
+  // drives page count here, one song per page), not a second, separate
+  // pass over the built pages to count them.
+  const TOC_SPLIT_THRESHOLD = 50;
+  const TOC_ENTRIES_PER_PAGE = 50;
+
+  // How many front-matter pages (title + contents) entryCount produces —
+  // needed *before* building anything, since every song page's own number
+  // depends on how many pages precede it, and every contents entry's own
+  // page number depends on that same count.
+  function frontMatterPageCount(entryCount) {
+    return entryCount > TOC_SPLIT_THRESHOLD ? Math.ceil(entryCount / TOC_ENTRIES_PER_PAGE) : 1;
+  }
+
+  // titleText goes through textContent, not an HTML string — unlike
+  // "Songbook" (showPrintBook's own title, fixed at build time), a
+  // setlist's own name (showPrintSetlist) is user content from the setlist
+  // markdown, and this is the one caller that has to handle both without
+  // knowing which it was given.
+  //
+  // "With chords for X" under the title, when an instrument is selected —
+  // PT: readers need to know, from the title page alone, which instrument
+  // the chord shapes throughout the book are for. Tied to currentInstrument
+  // being set at all, not to whether any particular song actually has
+  // diagrams (buildSongPrintPage's own smaller, per-song note is the
+  // finer-grained version of that check).
+  //
+  // entries already carry their final pageNumber (or null — SPEC.md §6.1's
+  // unresolved case, rendered as "—": a setlist entry with no matching song
+  // has no page to point to, and a made-up number would be worse than
+  // admitting there isn't one) — this function only lays them out, split
+  // across pages of TOC_ENTRIES_PER_PAGE once there are more than
+  // TOC_SPLIT_THRESHOLD of them, matching frontMatterPageCount()'s own math
+  // exactly (same threshold, same chunk size) so the two never disagree
+  // about how many pages this actually produces.
+  function buildFrontMatterPages(titleText, entries) {
+    const chunkSize = entries.length > TOC_SPLIT_THRESHOLD ? TOC_ENTRIES_PER_PAGE : entries.length || 1;
+    const chunks = [];
+    for (let i = 0; i < entries.length; i += chunkSize) chunks.push(entries.slice(i, i + chunkSize));
+    if (chunks.length === 0) chunks.push([]); // no entries at all — still a title page
+
+    return chunks.map((chunk, chunkIndex) => {
+      const page = document.createElement("div");
+      page.className = "print-page print-title-page print-toc";
+
+      if (chunkIndex === 0) {
+        const heading = document.createElement("h1");
+        heading.textContent = titleText;
+        page.appendChild(heading);
+        if (currentInstrument) {
+          const subtitle = document.createElement("p");
+          subtitle.className = "print-chords-for";
+          subtitle.textContent = `With chords for ${currentInstrument}`;
+          page.appendChild(subtitle);
+        }
+      }
+
+      const tocHeading = document.createElement("h2");
+      tocHeading.textContent = chunks.length > 1 ? `Contents (${chunkIndex + 1}/${chunks.length})` : "Contents";
+      page.appendChild(tocHeading);
+
+      const list = document.createElement("ol");
+      // Built via createElement/textContent rather than an HTML string of
+      // list-item tags — not for the song titles' sake (escapeForInlineScript
+      // only guards the *embedded JSON-LD* script tag, not this one), but
+      // because this function's own source, embedded into the page via
+      // .toString(), would otherwise contain that tag's own literal text —
+      // indistinguishable, to a build step checking the *page's* markup for
+      // pre-rendered list items, from the page actually shipping one. (Yes,
+      // spelling it out that carefully above is deliberate, for the same
+      // reason.)
+      for (const entry of chunk) {
+        const item = document.createElement("li");
+        item.className = "print-toc-entry";
+        const title = document.createElement("span");
+        title.textContent = entry.name;
+        const pageNumber = document.createElement("span");
+        pageNumber.textContent = entry.pageNumber === null ? "—" : String(entry.pageNumber);
+        item.appendChild(title);
+        item.appendChild(pageNumber);
+        list.appendChild(item);
+      }
+      page.appendChild(list);
+      addPageNumber(page, chunkIndex + 1);
+      return page;
+    });
+  }
+
+  function showPrintBook() {
+    currentPrintRebuild = showPrintBook;
+    const firstSongPageNumber = 1 + frontMatterPageCount(songs.length);
+
+    const songPages = songs.map((song, index) => {
+      const parsedSong = new ChordProSong(song.text);
+      // Each song in its own key/capo, not whatever is currently selected
+      // on screen (SPEC.md §11) — that selection belongs to viewing one
+      // song, not to a whole-book print a reader didn't make that choice
+      // for.
+      const rendered = renderSong(parsedSong, song.text, {});
+      return buildSongPrintPage(song.name, rendered, firstSongPageNumber + index);
+    });
+
+    const frontPages = buildFrontMatterPages(
+      "Songbook",
+      songs.map((song, index) => ({ name: song.name, pageNumber: firstSongPageNumber + index })),
+    );
+
+    printContent.replaceChildren(...frontPages, ...songPages);
+    enterPrintView();
+    songPages.forEach(fitPrintSongPage);
+  }
+
+  // Same shape as showPrintBook, scoped to one setlist's own entries in
+  // setlist order, each in that entry's own transpose/capo override
+  // (falling back to the song's own value when an entry doesn't specify
+  // one — renderSong's own `transpose ?? chordProSong.transpose` already
+  // does this correctly when entry.transpose/entry.capo are simply
+  // undefined, so there's nothing extra to resolve here). An entry with no
+  // matching song (entry.songIndex === -1 — SPEC.md §6.1's unresolved/
+  // ambiguous case) has nothing to print a page *for*, so it's skipped
+  // from songPages, but still listed in the contents page (with "—" in
+  // place of a page number) — silently dropping it from the printed book
+  // entirely would hide the exact mismatch this whole feature is meant to
+  // surface. frontMatterPageCount() is given every entry, resolved or not,
+  // for the same reason: the contents page lists all of them either way.
+  function showPrintSetlist(index) {
+    const setlist = setlists[index];
+    if (!setlist) return;
+    currentPrintRebuild = () => showPrintSetlist(index);
+    const firstSongPageNumber = 1 + frontMatterPageCount(setlist.entries.length);
+
+    const songPages = [];
+    let printableCount = 0;
+    const tocEntries = setlist.entries.map((entry) => {
+      if (entry.songIndex < 0) return { name: entry.name, pageNumber: null };
+      const song = songs[entry.songIndex];
+      const parsedSong = new ChordProSong(song.text);
+      const rendered = renderSong(parsedSong, song.text, { transpose: entry.transpose, capo: entry.capo });
+      const pageNumber = firstSongPageNumber + printableCount;
+      songPages.push(buildSongPrintPage(entry.name, rendered, pageNumber));
+      printableCount += 1;
+      return { name: entry.name, pageNumber };
+    });
+    const frontPages = buildFrontMatterPages(setlist.name, tocEntries);
+
+    printContent.replaceChildren(...frontPages, ...songPages);
+    enterPrintView();
+    songPages.forEach(fitPrintSongPage);
+  }
+
+  // Setlists (SPEC.md §6) — display and print only in this pass, per PT's
+  // own ordering ("just display them and make them printable before
+  // tackling editing them and making new ones"). No hamburger menu here
+  // either, same as instrument selection/print: the setlist list is just
+  // another section of #list-view, and #setlist-view is a fourth
+  // top-level view alongside list/song/print (enterPrintView() hides it
+  // the same way it hides the other two; showList()/showSong() hide it
+  // for the same reason they hide #print-view).
+  function updateToggleNotesButtonLabel() {
+    toggleNotesButton.textContent = notesVisible ? "Hide notes" : "Show notes";
+  }
+
+  // One row per entry, grouped under a heading whenever custom:setName
+  // changes from the entry before it (SPEC.md §6's own set groupings, e.g.
+  // "Set 1"/"Set 2" in the source markdown) — entries without a setName at
+  // all just don't get a heading, rather than one reading "undefined".
+  function renderSetlistEntries(setlist) {
+    setlistEntriesElement.replaceChildren();
+    let lastSetName = null;
+    // Tracks each entry's own position within the *playable* subset —
+    // getActivePlaylist()'s own filtering (songIndex >= 0), kept in exact
+    // step with it here so a click on entry N always opens showSong() at
+    // the same position getActivePlaylist() would put it at.
+    let playablePosition = 0;
+    setlist.entries.forEach((entry, index) => {
+      if (entry.setName && entry.setName !== lastSetName) {
+        const heading = document.createElement("h3");
+        heading.className = "setlist-set-name";
+        heading.textContent = entry.setName;
+        setlistEntriesElement.appendChild(heading);
+        lastSetName = entry.setName;
+      }
+      const isPlayable = entry.songIndex >= 0;
+      setlistEntriesElement.appendChild(
+        buildSetlistEntryRow(entry, index + 1, isPlayable ? playablePosition : null),
+      );
+      if (isPlayable) playablePosition += 1;
+    });
+  }
+
+  // position (its own display number, 1-based) is just for the row's own
+  // label; playablePosition (null for an unresolved entry) is what
+  // showSong() actually needs — see renderSetlistEntries' own comment on
+  // why the two can diverge (an unresolved entry earlier in the list still
+  // counts toward `position`, but never toward `playablePosition`).
+  function buildSetlistEntryRow(entry, position, playablePosition) {
+    const row = document.createElement("div");
+    row.className = "setlist-entry";
+
+    const positionElement = document.createElement("span");
+    positionElement.className = "setlist-entry-position";
+    positionElement.textContent = String(position);
+    row.appendChild(positionElement);
+
+    // A link only when there's a real song behind this entry to jump to —
+    // an unresolved entry (below) has nothing showSong() could open.
+    const nameElement = document.createElement(entry.songIndex >= 0 ? "a" : "span");
+    nameElement.className = "setlist-entry-name";
+    nameElement.textContent = entry.name;
+    if (entry.songIndex >= 0) {
+      nameElement.href = "#";
+      nameElement.addEventListener("click", (event) => {
+        event.preventDefault();
+        showSong(playablePosition);
+      });
+    }
+    row.appendChild(nameElement);
+
+    // Directly actionable, not just descriptive: matchStatus/
+    // matchCandidates are written at crate-build time (chordpro_crate.js)
+    // from this entry's own heading text in the setlist markdown — a
+    // mismatch here means that heading doesn't clearly identify one real
+    // song, which is fixed by editing the .setlist.md file and rebuilding
+    // the crate, not by anything this read-only page can do itself
+    // (SPEC.md §2 rules out writing back to the source folder). Surfacing
+    // this clearly is the point PT asked for: "helping the user fix
+    // mismatches back in the crate-gen stage."
+    if (entry.matchStatus !== "exact") {
+      const statusMessages = {
+        unresolved: "no matching song found — check this entry's heading against the song titles",
+        ambiguous: "matches more than one song — make this entry's heading more specific",
+        fuzzy: "matched approximately, not exactly — check this is the right song",
+      };
+      const status = document.createElement("span");
+      status.className = "setlist-entry-status";
+      status.textContent = `⚠ ${statusMessages[entry.matchStatus] || entry.matchStatus}`;
+      row.appendChild(status);
+    }
+
+    if (entry.notes) {
+      const notes = document.createElement("div");
+      notes.className = "setlist-entry-notes";
+      notes.textContent = entry.notes;
+      setHidden(notes, !notesVisible);
+      row.appendChild(notes);
+    }
+
+    return row;
+  }
+
+  function showSetlist(index) {
+    const setlist = setlists[index];
+    if (!setlist) return;
+    currentSetlistIndex = index;
+    currentIndex = -1;
+    currentSongIndex = -1;
+
+    setHidden(listView, true);
+    setHidden(songView, true);
+    setHidden(menuBar, true);
+    setHidden(printView, true);
+    setHidden(setlistIndexView, true);
+    setHidden(setlistView, false);
+
+    setlistViewTitle.textContent = setlist.name;
+    updateToggleNotesButtonLabel();
+    renderSetlistEntries(setlist);
+  }
+
+  function showSetlistIndex() {
+    currentIndex = -1;
+    currentSongIndex = -1;
+    currentSetlistIndex = -1;
+    setHidden(listView, true);
+    setHidden(songView, true);
+    setHidden(menuBar, true);
+    setHidden(printView, true);
+    setHidden(setlistView, true);
+    setHidden(setlistIndexView, false);
+  }
+
+  function showList() {
+    currentIndex = -1;
+    currentSongIndex = -1;
+    currentSetlistIndex = -1;
+    setHidden(listView, false);
+    setHidden(songView, true);
+    setHidden(menuBar, true);
+    setHidden(prevButton, true);
+    setHidden(nextButton, true);
+    setHidden(chordDiagramsPanel, true);
+    setHidden(printView, true);
+    setHidden(setlistView, true);
+    setHidden(setlistIndexView, true);
+  }
+
+  // Once a setlist is open, it *is* "the list" (PT) — next/previous page
+  // through that setlist's own order, not the global song list, until the
+  // reader explicitly leaves it (the "Back to songs" button on
+  // #setlist-index-view, or a song opened from the global list directly).
+  // currentSetlistIndex (-1 for "no active setlist") decides which; this
+  // is the one place that decision gets made, so showSong() and the
+  // prev/next handlers never have to know which context they're in
+  // themselves — just what position they're at within whichever this
+  // returns. Position, not song identity: a setlist entry's own place in
+  // *this* list is what "next"/"previous" and the disabled state at either
+  // end have to be relative to, not the entry's underlying song's place in
+  // the alphabetical global list.
+  function getActivePlaylist() {
+    if (currentSetlistIndex >= 0) {
+      return setlists[currentSetlistIndex].entries
+        .filter((entry) => entry.songIndex >= 0)
+        .map((entry) => ({ songIndex: entry.songIndex, transpose: entry.transpose, capo: entry.capo }));
+    }
+    return songs.map((_song, index) => ({ songIndex: index, transpose: undefined, capo: undefined }));
+  }
+
+  // position indexes into getActivePlaylist(), not directly into `songs` —
+  // identical to a song index while browsing the global list (that
+  // playlist is just every song, in order), but not once a setlist is
+  // active. transpose/capo come from whichever slot that playlist has at
+  // this position: undefined for the global list (nothing to override),
+  // or a setlist entry's own override, if it has one (SPEC.md §6) — falling
+  // back to the song's session-saved or default value, exactly as if
+  // nothing had overridden it, when it doesn't.
+  function showSong(position) {
+    const playlist = getActivePlaylist();
+    const slot = playlist[position];
+    if (!slot) return;
+    const song = songs[slot.songIndex];
+    if (!song) return;
+    currentIndex = position;
+    currentSongIndex = slot.songIndex;
+
+    if (slot.transpose !== undefined || slot.capo !== undefined) {
+      currentTranspose = slot.transpose ?? null;
+      currentCapo = slot.capo ?? null;
+    } else {
+      // Restores whatever was last chosen for this song's own id, this
+      // session — falling back to null (the song's own key/capo) for a
+      // song that's never been touched, or when nothing was saved at all.
+      const saved = loadSavedSelections()[song.id];
+      currentTranspose = saved ? saved.transpose : null;
+      currentCapo = saved ? saved.capo : null;
+    }
+
+    // Visibility toggled before content/fit, not after: fitSongContent()
+    // reads menuBar.offsetHeight and songContent.clientWidth, both of which
+    // are 0 for a display:none element — measuring before these are shown
+    // would size the fit against the wrong (empty) box.
+    setHidden(listView, true);
+    setHidden(songView, false);
+    setHidden(menuBar, false);
+    setHidden(prevButton, false);
+    setHidden(nextButton, false);
+    setHidden(printView, true);
+    setHidden(setlistView, true);
+    setHidden(setlistIndexView, true);
+
+    songViewTitle.textContent = song.name;
+    prevButton.disabled = position <= 0;
+    nextButton.disabled = position >= playlist.length - 1;
+
+    renderCurrentSong();
+  }
+
+  // "Back to list" means back to whichever list is currently active — the
+  // setlist a song was opened from, if any, otherwise the global list.
+  // Not the same check as exitPrintView()'s own (which also has to
+  // consider "back to the song itself"): this button only ever shows while
+  // a song is open, so there's no "back to a song" case to worry about
+  // here.
+  function backToCurrentList() {
+    if (currentSetlistIndex >= 0) showSetlist(currentSetlistIndex);
+    else showList();
+  }
+
+  populateInstrumentSelect(instrumentSelect);
+  populateInstrumentSelect(printInstrumentSelect);
+
+  // #view-setlists-button, not the setlist list shown inline at all times —
+  // PT: "don't just put a list down the bottom unless there's a button to
+  // go to it." Built once, same as the song list below; only shown at all
+  // if the crate actually has setlists.
+  if (setlists.length) {
+    setHidden(viewSetlistsButton, false);
+    setlists.forEach((setlist, index) => {
+      const item = document.createElement("li");
+      const link = document.createElement("a");
+      link.href = "#";
+      link.textContent = setlist.name;
+      link.addEventListener("click", (event) => {
+        event.preventDefault();
+        showSetlist(index);
+      });
+      item.appendChild(link);
+      setlistListElement.appendChild(item);
+    });
+  } else {
+    setHidden(viewSetlistsButton, true);
+  }
+  viewSetlistsButton.addEventListener("click", showSetlistIndex);
+  backFromSetlistIndexButton.addEventListener("click", showList);
+
+  songs.forEach((song, index) => {
+    const item = document.createElement("li");
+    const link = document.createElement("a");
+    link.href = "#";
+    link.textContent = song.name;
+    link.addEventListener("click", (event) => {
+      event.preventDefault();
+      showSong(index);
+    });
+    item.appendChild(link);
+    songListElement.appendChild(item);
+  });
+
+  // "Find a song" — filters #song-list's own rows in place by substring
+  // match, ported from chordprosite's own #searchBox (template.njk); the
+  // list is index-parallel with `songs` (built from it, in the same order,
+  // just above), so filtering by index needs no querySelector/lookup.
+  //
+  // Array.from(...) — not a stylistic choice: a real element's .children is
+  // a live HTMLCollection, which has no .forEach at all (unlike NodeList,
+  // which does). This did nothing at all in a real browser as a result —
+  // caught only by actually opening the page, since this file's own fake
+  // DOM models .children as a plain array, which does have one.
+  songSearchInput.addEventListener("input", () => {
+    const query = songSearchInput.value.trim().toLowerCase();
+    Array.from(songListElement.children).forEach((item, index) => {
+      setHidden(item, query.length > 0 && !songs[index].name.toLowerCase().includes(query));
+    });
+  });
+
+  backButton.addEventListener("click", backToCurrentList);
+  prevButton.addEventListener("click", () => { if (currentIndex > 0) showSong(currentIndex - 1); });
+  nextButton.addEventListener("click", () => {
+    if (currentIndex < getActivePlaylist().length - 1) showSong(currentIndex + 1);
+  });
+
+  // Attached once, here, rather than freshly inside every renderCurrentSong()
+  // call — a real browser would otherwise accumulate one more "change"
+  // listener on the same element each time a song opens, all of them firing
+  // on the next change. Reading songs[currentSongIndex]/parsedSong.key live
+  // (rather than closing over values captured when the song first opened)
+  // is what makes that safe: this pair of handlers works correctly no
+  // matter which song is current when either one actually fires.
+  keySelect.addEventListener("change", () => {
+    const parsedSong = new ChordProSong(songs[currentSongIndex].text);
+    currentTranspose = parsedSong.key ? keySelect.value : parseInt(keySelect.value, 10);
+    // Matches chordprosite's own key-change handler (`display(this.value,
+    // 0)`): picking a different key always clears any capo choice back to
+    // none, rather than keeping a capo picked for a different key.
+    currentCapo = 0;
+    saveCurrentSelection();
+    renderCurrentSong();
+  });
+  capoSelect.addEventListener("change", () => {
+    currentCapo = capoSelect.value === "" ? 0 : parseInt(capoSelect.value, 10);
+    saveCurrentSelection();
+    renderCurrentSong();
+  });
+  // Not part of saveCurrentSelection()/the per-song sessionStorage record —
+  // see currentInstrument's own declaration above for why.
+  instrumentSelect.addEventListener("change", () => {
+    setCurrentInstrument(instrumentSelect.value);
+    renderCurrentSong();
+  });
+  // The print-banner's own copy of the same control — PT: let the
+  // instrument be picked/changed from print preview itself, not only from
+  // a song viewed beforehand. Redraws whatever's currently on screen
+  // (single song, whole book, or a setlist) with the new choice rather
+  // than requiring a trip back out of print mode to see the effect.
+  printInstrumentSelect.addEventListener("change", () => {
+    setCurrentInstrument(printInstrumentSelect.value);
+    if (currentPrintRebuild) currentPrintRebuild();
+  });
+
+  printSongButton.addEventListener("click", showPrintSong);
+  printBookButton.addEventListener("click", showPrintBook);
+  printNowButton.addEventListener("click", () => window.print());
+  donePrintingButton.addEventListener("click", exitPrintView);
+  // Back to the setlist *index* (one level up), not all the way to the
+  // global song list — "Back to songs" on #setlist-index-view is the one
+  // that goes there.
+  backFromSetlistButton.addEventListener("click", showSetlistIndex);
+  printSetlistButton.addEventListener("click", () => showPrintSetlist(currentSetlistIndex));
+  toggleNotesButton.addEventListener("click", () => {
+    notesVisible = !notesVisible;
+    updateToggleNotesButtonLabel();
+    renderSetlistEntries(setlists[currentSetlistIndex]);
+  });
+  // Escape only exits print mode specifically — it's not a general
+  // "close whatever's open" shortcut elsewhere in this app, just the one
+  // PT asked to be told about before printing, as an easy way back.
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !isHidden(printView)) exitPrintView();
+  });
+
+  // Full screen — usable from any view (see #fullscreen-button's own CSS
+  // comment); a plain toggle against the Fullscreen API rather than
+  // tracking its own state, since fullscreenchange also fires when the
+  // browser itself exits fullscreen (Escape key, unrelated to this app's
+  // own Escape handler above, which only ever checks print view).
+  function updateFullscreenButtonLabel() {
+    fullscreenButton.textContent = document.fullscreenElement ? "Exit full screen" : "Full screen";
+  }
+  fullscreenButton.addEventListener("click", () => {
+    const request = document.fullscreenElement
+      ? document.exitFullscreen()
+      : document.documentElement.requestFullscreen();
+    // Both return a promise that can reject (permissions policy, calling
+    // it outside a genuine user gesture in some browser) — nothing useful
+    // to do about that for a convenience feature beyond not leaving an
+    // unhandled rejection behind.
+    request.catch(() => {});
+  });
+  document.addEventListener("fullscreenchange", updateFullscreenButtonLabel);
+  updateFullscreenButtonLabel();
+
+  showList();
+}
+
+export function renderSongbookHtml(crateJson) {
+  const embeddedJson = escapeForInlineScript(JSON.stringify(crateJson, null, 2));
+
+  return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Songbook</title>
+<style>
+/* High contrast, on PT's explicit instruction: no filled panels behind any
+   text (no --surface-alt tint anywhere — chorus/bridge and tab blocks are
+   marked by a rule/border, never a background fill), the page reduced to
+   plain black-on-white (white-on-black under prefers-color-scheme: dark),
+   and --chord left constant across both themes rather than following
+   --ink/--bg, so it stays the one bright, unmistakable colour on the page
+   — reserved for chord names and nothing else, which is why every other
+   control below uses --ink/--accent (effectively black/white) rather than
+   reaching for colour of its own.
+
+   .hidden still carries !important for the reason recorded in
+   initSongbookApp's own setHidden() — an ID selector elsewhere in this
+   block would otherwise beat a plain .hidden rule on the same element. */
+:root {
+  --bg: #ffffff;
+  --surface: #ffffff;
+  --ink: #000000;
+  --muted: #555555;
+  --accent: #000000;
+  --accent-contrast: #ffffff;
+  --border: #000000;
+  --chord: #ff0000;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #000000;
+    --surface: #000000;
+    --ink: #ffffff;
+    --muted: #b3b3b3;
+    --accent: #ffffff;
+    --accent-contrast: #000000;
+    --border: #ffffff;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: Georgia, "Iowan Old Style", "Palatino Linotype", serif;
+  line-height: 1.5;
+}
+.hidden { display: none !important; }
+
+#menu-bar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.6rem 1rem;
+  background: var(--surface);
+  border-bottom: 2px solid var(--border);
+  font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+}
+#menu-bar-center {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.9rem;
+}
+#song-view-title {
+  font-weight: 700;
+  font-size: 1.05rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  /* The one thing in #menu-bar-center allowed to shrink/truncate — the key
+     and capo selects below are fixed-width controls, not readable text, so
+     they keep flex-shrink: 0 and let the title give way first on a narrow
+     screen. */
+  flex-shrink: 1;
+}
+#menu-bar button {
+  font-family: inherit;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+#key-select, #capo-select, #instrument-select {
+  flex-shrink: 0;
+  font-family: inherit;
+  font-size: 0.85rem;
+  padding: 0.3rem 0.4rem;
+  border: 1px solid var(--ink);
+  background: var(--bg);
+  color: var(--ink);
+}
+#prev-song-button, #next-song-button {
+  flex: 0 0 auto;
+  padding: 0.5rem 1.1rem;
+  border: 2px solid var(--accent);
+  background: var(--accent);
+  color: var(--accent-contrast);
+  font-weight: 700;
+}
+#prev-song-button:disabled, #next-song-button:disabled {
+  background: var(--bg);
+  color: var(--muted);
+  border-color: var(--muted);
+  cursor: not-allowed;
+}
+#back-to-list-button {
+  padding: 0.5rem 0.9rem;
+  border: 2px solid var(--ink);
+  background: var(--bg);
+  color: var(--ink);
+  font-weight: 700;
+}
+
+#list-view, #setlist-index-view {
+  max-width: 46rem;
+  margin: 0 auto;
+  padding: 1.5rem 1.25rem 4rem;
+}
+#list-view h1, #setlist-index-view h1 {
+  font-size: 1.6rem;
+  font-weight: 700;
+  border-bottom: 2px solid var(--border);
+  padding-bottom: 0.5rem;
+}
+/* align-items: center, not flex's own default (stretch) — without it,
+   "Print this songbook" and "Setlists" (very different label lengths, but
+   that's exactly what shouldn't matter) would stretch to match whichever
+   of the two is tallest, rather than each sizing to its own content — the
+   actual cause of "Setlists" reading oddly large (PT). */
+#list-view-buttons { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; margin-top: 1rem; }
+#list-view-buttons button, #back-from-setlist-index-button {
+  padding: 0.5rem 1rem;
+  border: 2px solid var(--ink);
+  background: var(--bg);
+  color: var(--ink);
+  font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+#song-search {
+  display: block;
+  width: 100%;
+  margin-top: 1rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--ink);
+  background: var(--bg);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 1rem;
+  box-sizing: border-box;
+}
+/* "Cap the list to a screenful and make it scroll" (PT) — the list itself
+   scrolls independently of the page once it's taller than this, rather
+   than pushing the search box and page itself further down as the crate
+   grows. */
+#song-list, #setlist-list {
+  list-style: none;
+  margin: 1rem 0 0;
+  padding: 0;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+#song-list li, #setlist-list li { border-bottom: 1px solid var(--border); }
+#song-list a, #setlist-list a {
+  display: block;
+  padding: 0.65rem 0.25rem;
+  color: var(--ink);
+  text-decoration: none;
+}
+#song-list a:hover, #setlist-list a:hover { text-decoration: underline; }
+
+/* Deliberately no max-width/centring here, unlike #list-view: the fitting
+   algorithm in initSongbookApp (fitSongContent) sizes #song-content's own
+   font to fill whatever width this section actually has, so constraining
+   that width to a comfortable reading column would work against the point
+   of the feature — using as much of the screen as the device has, which is
+   what an on-stage, hands-off-the-keyboard use case wants.
+
+   A flex row, #song-content and #chord-diagrams side by side (chordprosite's
+   own layout too — its .content-container/.chords), not stacked: that's
+   what makes #chord-diagrams' width, when visible, come out of
+   #song-content's own clientWidth for free — fitSongContent reads that
+   directly, so it never needs to know the chord panel exists or subtract
+   its width itself. Vertically the two are independent: #chord-diagrams
+   scrolls on its own rather than growing #song-view taller than the
+   fitted text already made it. */
+#song-view { display: flex; padding: 1rem 1.5rem 3rem; gap: 1.5rem; }
+#song-content { flex: 1; min-width: 0; }
+#chord-diagrams {
+  flex: 0 0 auto;
+  width: 11rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 0.5rem;
+  max-height: calc(100vh - 6rem);
+  overflow-y: auto;
+  border-left: 1px solid var(--border);
+  padding-left: 1rem;
+}
+#chord-diagrams svg { display: block; }
+
+/* Shared between #song-content (the on-screen, fitted view) and
+   #print-content (print mode, below) — both hold the same renderSong()
+   output markup, so both need the same rules for it. */
+#song-content .heading, #print-content .heading { margin: 1.1em 0 0.3em; font-weight: 700; }
+#song-content .line, #print-content .line { margin: 0.1em 0; }
+/* Collapses consecutive blank lines (renderSong emits an empty .line div
+   for some blank source lines) down to one — ported directly from
+   chordprosite's own template.njk, which uses the same rule for the same
+   reason: wasted vertical space here is wasted headroom for the font-size
+   search in fitSongContent to grow into. */
+#song-content .line:empty + .line:empty, #print-content .line:empty + .line:empty { display: none; }
+#song-content .inlineChord, #print-content .inlineChord {
+  color: var(--chord);
+  font-weight: 700;
+  font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+  font-size: 0.95em;
+}
+#song-content blockquote.chorus, #song-content blockquote.bridge,
+#print-content blockquote.chorus, #print-content blockquote.bridge {
+  margin: 0.75em 0;
+  padding: 0.2em 0 0.2em 1em;
+  border-left: 4px solid var(--ink);
+}
+#song-content pre, #print-content pre {
+  border: 1px solid var(--border);
+  padding: 0.75em 1em;
+  overflow-x: auto;
+  font-family: "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.9em;
+}
+/* Landscape-proportioned screens get two columns instead of one long
+   scroll — toggled by fitSongContent, not fixed at build time, since
+   whether a screen counts as "landscape" here depends on how much height
+   the sticky menu bar leaves, not just raw viewport orientation. */
+#song-content.two-columns {
+  column-count: 2;
+  column-gap: 2rem;
+}
+
+#print-song-button {
+  flex-shrink: 0;
+  padding: 0.5rem 0.9rem;
+  border: 1px solid var(--ink);
+  background: var(--bg);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+/* Fixed at the top-left corner rather than inside any one view, unlike
+   every other button on this page — usable from the list, a song, or
+   (harmlessly, if pointless) print mode alike, matching the actual use
+   case: clearing browser chrome for more screen before playing, not
+   something tied to what's currently open. Sits *below* #menu-bar's own
+   top-left button (#prev-song-button), not on top of it — the sticky bar
+   pins to the very top of the viewport when a song is open, and
+   #prev-song-button is that bar's own leftmost thing, so "top left" for
+   this button specifically means just under the bar's height, not literal
+   (0, 0). z-index above #menu-bar's own (10) regardless, since the two no
+   longer overlap but the bar still shouldn't ever paint over this. */
+#fullscreen-button {
+  position: fixed;
+  top: 3.5rem;
+  left: 0.5rem;
+  z-index: 20;
+  padding: 0.4rem 0.8rem;
+  border: 1px solid var(--ink);
+  background: var(--bg);
+  color: var(--ink);
+  font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+/* #print-view is a third top-level view alongside #list-view/#song-view
+   (see enterPrintView()/exitPrintView() in initSongbookApp). */
+#print-view { padding: 1.5rem; overflow-x: auto; }
+#print-banner {
+  max-width: 46rem;
+  margin: 0 auto 1.5rem;
+  padding: 1rem;
+  border: 2px solid var(--ink);
+}
+#print-banner button, #print-banner select {
+  margin-top: 0.75rem;
+  margin-right: 0.5rem;
+  padding: 0.5rem 1rem;
+  border: 2px solid var(--ink);
+  background: var(--bg);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+/* Real A4, not chordprosite's own 210mm/297mm scaled by 1.5 (315mm x
+   445.5mm — not a real paper size, and not one this rewrite reproduces).
+   Deliberately NOT confined to @media print — see this section's own
+   header comment (initSongbookApp) for why fitPrintSongPage needs this box
+   to already have its real size on screen, before printing, not only once
+   print-specific CSS takes effect. 10mm padding, not chordprosite's own
+   15mm (PT: "make the printed pages a bit tighter... largest possible
+   print for stage use and visually impaired colleagues") — this value has
+   to match initSongbookApp's own PRINT_PAGE_PADDING_MM constant exactly;
+   see that constant's own comment for why the two can't share one source.
+   position: relative so .print-page-number (an absolutely-positioned
+   child) anchors to this page's own box, not some other ancestor. */
+.print-page {
+  position: relative;
+  width: 210mm;
+  margin: 0 auto 1.5rem;
+  padding: 10mm;
+  box-sizing: border-box;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+/* margin: 0 on the heading itself, not just a tight value — killing off
+   the browser's own default <h1> margin is what "put the heading higher
+   up" (PT) actually means: that default margin, not this page's own
+   padding, was the biggest single gap above the title. */
+.print-title-page h1, .print-song-title { text-align: center; margin: 0 0 0.15rem; }
+/* "The 'with chords for' text right under it" (PT) — margin-top: 0 puts it
+   directly against the heading above; the bottom margin is what actually
+   separates it from the contents list/song text below. */
+.print-chords-for { text-align: center; color: var(--muted); margin: 0 0 0.75rem; }
+.print-chords-for-note {
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-style: italic;
+  margin: 0 0 0.5rem;
+}
+.print-toc-entry {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  font-variant-numeric: tabular-nums;
+}
+/* Absolutely positioned — never takes up flow space, so fitPrintSongPage
+   never needs to account for it (its own comment). PT: "if the number of
+   pages goes over about 50... put page numbers on the pages as well." */
+.print-page-number {
+  position: absolute;
+  top: 10mm;
+  right: 10mm;
+  font-size: 9pt;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+/* Chord grids beside the song text, not above it — same side-panel
+   reasoning as the on-screen #chord-diagrams (its own CSS comment) — width
+   comes out of .print-song-body's own clientWidth for free, which is what
+   lets fitPrintSongPage measure it directly instead of subtracting a
+   diagrams-panel width itself. */
+.print-song-row { display: flex; gap: 1rem; }
+.print-song-body { flex: 1; min-width: 0; }
+.print-chord-diagrams {
+  flex: 0 0 auto;
+  width: 9rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 0.4rem;
+}
+
+@media print {
+  /* Only #print-content is meant to end up on paper — the on-screen
+     instructions/buttons above it, and anything from the other two views
+     that isn't already display:none, have no reason to print. #fullscreen-
+     button is fixed-position across every view specifically so it's always
+     reachable (its own CSS comment) — "always", it turns out, still isn't
+     supposed to include an actual printed page. */
+  #print-banner, #fullscreen-button { display: none; }
+  #print-view { padding: 0; overflow: visible; }
+  /* The border/gap between pages is an on-screen page-separator cue only —
+     printed pages are separated by actual paper, not a rule between them,
+     and page-break-after replaces the margin-based gap with a real break. */
+  .print-page { margin: 0 auto; border: none; page-break-after: always; }
+  .print-page:last-child { page-break-after: auto; }
+  @page { margin: 0; }
+}
+
+/* Setlists (SPEC.md §6) — #setlist-index-view (the list of setlists,
+   #song-list/#setlist-list's shared styling above) and #setlist-view (one
+   setlist's own entries), two more top-level views alongside list/song/
+   print. */
+#setlist-view { max-width: 46rem; margin: 0 auto; padding: 1rem 1.5rem 3rem; }
+#setlist-menu-bar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+  padding-bottom: 1rem;
+  margin-bottom: 1rem;
+  border-bottom: 2px solid var(--border);
+  font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+}
+#setlist-view-title { flex: 1; min-width: 0; font-size: 1.3rem; margin: 0; }
+#setlist-menu-bar button {
+  flex-shrink: 0;
+  padding: 0.5rem 0.9rem;
+  border: 1px solid var(--ink);
+  background: var(--bg);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+.setlist-set-name { margin: 1.5rem 0 0.5rem; font-size: 1.05rem; }
+.setlist-entry {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--border);
+}
+.setlist-entry-position { color: var(--muted); font-variant-numeric: tabular-nums; }
+.setlist-entry-name { color: var(--ink); font-weight: 600; }
+a.setlist-entry-name:hover { text-decoration: underline; }
+/* A bordered badge, not colour: --chord red is reserved for chord names on
+   the song page itself (SPEC.md §11's own "Visual design" note — every
+   other control uses plain black/white specifically so red stays a single,
+   unambiguous marker), so this can't borrow colour to stand out and uses a
+   border instead, the same "shape/weight, not fill or colour" idiom already
+   used for chorus/bridge and disabled buttons elsewhere on this page. */
+.setlist-entry-status {
+  border: 1px solid var(--ink);
+  padding: 0.15rem 0.5rem;
+  font-weight: 700;
+  font-size: 0.85rem;
+}
+.setlist-entry-notes { flex-basis: 100%; color: var(--muted); font-style: italic; }
+</style>
+</head>
+<body>
+
+<button id="fullscreen-button" type="button">Full screen</button>
+
+<nav id="menu-bar" class="hidden">
+<button id="prev-song-button" type="button">&larr; Prev</button>
+<div id="menu-bar-center">
+<button id="back-to-list-button" type="button">Back to list</button>
+<span id="song-view-title"></span>
+<select id="key-select" class="hidden" aria-label="Key"></select>
+<select id="capo-select" class="hidden" aria-label="Capo"></select>
+<select id="instrument-select" class="hidden" aria-label="Instrument"></select>
+<button id="print-song-button" type="button">Print this song</button>
+</div>
+<button id="next-song-button" type="button">Next &rarr;</button>
+</nav>
+
+<section id="list-view">
+<h1>Songs</h1>
+<div id="list-view-buttons">
+<button id="print-book-button" type="button">Print this songbook</button>
+<button id="view-setlists-button" type="button" class="hidden">Setlists</button>
+</div>
+<input id="song-search" type="search" placeholder="Find a song&hellip;" aria-label="Find a song">
+<ul id="song-list"></ul>
+</section>
+
+<section id="setlist-index-view" class="hidden">
+<h1>Setlists</h1>
+<button id="back-from-setlist-index-button" type="button">Back to songs</button>
+<ul id="setlist-list"></ul>
+</section>
+
+<section id="song-view" class="hidden">
+<div id="song-content"></div>
+<div id="chord-diagrams" class="hidden"></div>
+</section>
+
+<section id="setlist-view" class="hidden">
+<nav id="setlist-menu-bar">
+<button id="back-from-setlist-button" type="button">Back to setlists</button>
+<h1 id="setlist-view-title"></h1>
+<button id="toggle-notes-button" type="button">Hide notes</button>
+<button id="print-setlist-button" type="button">Print this setlist</button>
+</nav>
+<div id="setlist-entries"></div>
+</section>
+
+<section id="print-view" class="hidden">
+<div id="print-banner">
+<p>When you're done printing (or if you change your mind), press <kbd>Escape</kbd> or click
+"Done printing" below to come back. Printing opens in this same window rather than a new
+one — a new window doesn't work in some contexts (SharePoint, Dropbox) this page may be
+opened from.</p>
+<select id="print-instrument-select" aria-label="Instrument"></select>
+<button id="print-now-button" type="button">Print now</button>
+<button id="done-printing-button" type="button">Done printing</button>
+</div>
+<div id="print-content"></div>
+</section>
+
+<script type="application/ld+json" id="crate-data">
+${embeddedJson}
+</script>
+<script>
+${CHORDPROBOOK_BROWSER_BUNDLE}
+var CHORDPROBOOK_INSTRUMENTS_DATA = ${JSON.stringify(CHORDPROBOOK_INSTRUMENTS_DATA)};
+var CHORDPROBOOK_CHORD_DATA = ${JSON.stringify(CHORDPROBOOK_CHORD_DATA)};
+</script>
+<script>
+(${initSongbookApp.toString()})(document, window);
+</script>
+</body>
+</html>
+`;
+}
+
+export const songbookHtmlPlugin = {
+  name: "chordpro-songbook-html-output",
+  hooks: {
+    [HOOKS.OUTPUT_WRITE]: async (ctx) => {
+      if (ctx.options.inputMode !== "chordpro") return;
+
+      if (!ctx.options.overwrite && (await fileExists(ctx.dirHandle, OUTPUT_FILE))) {
+        ctx.log(`Songbook HTML: ${OUTPUT_FILE} exists and overwrite is off — skipped.`, "warn");
+        return;
+      }
+
+      const crateJson = await readJsonFromFolder(ctx.dirHandle, CRATE_FILE);
+      if (!crateJson) {
+        ctx.log(`Songbook HTML: ${CRATE_FILE} not found — skipped.`, "warn");
+        return;
+      }
+
+      const index = buildCrateIndex(crateJson);
+      const songCount = entitiesOfType(index, "MusicComposition").filter(isCanonicalSong).length;
+      await writeFile(ctx.dirHandle, OUTPUT_FILE, renderSongbookHtml(crateJson));
+      ctx.log(`Songbook HTML: wrote ${OUTPUT_FILE} (${songCount} song(s); data, chordprobook, and the app are all embedded).`, "ok");
+    },
+  },
+};

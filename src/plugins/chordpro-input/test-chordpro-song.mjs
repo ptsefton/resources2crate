@@ -1,14 +1,16 @@
-// Unit tests for ChordProSong (src/plugins/chordpro-input/lib/ChordProSong.js)
-// — the ported metadata-extraction subset of chordprosite's Song.js. See
-// SPEC.md §5 for the design and the deliberate divergences/additions this
-// exercises: {composer} extraction (an addition), and the preserved
-// accumulate-rather-than-first-wins behaviour of {title}/{subtitle} plus the
-// {version} suffix (kept exactly as chordprosite's own class behaves).
+// Unit tests for ChordProSong, now sourced from the chordprobook package
+// (see its own SPEC.md §3.1) rather than a local copy — the ported
+// metadata-extraction subset of chordprosite's Song.js. Kept here, not just
+// in chordprobook's own test suite, as a regression check on the dependency
+// from resources2crate's own side: {composer} extraction (an addition), and
+// the preserved accumulate-rather-than-first-wins behaviour of
+// {title}/{subtitle} plus the {version} suffix (kept exactly as
+// chordprosite's own class behaves).
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { ChordProSong } from "./lib/ChordProSong.js";
+import { ChordProSong } from "chordprobook";
 
 const fixturesDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "samples");
 const readFixture = (name) => readFileSync(path.join(fixturesDir, name), "utf8");

@@ -13,6 +13,7 @@ import { plugin as validateCratePlugin } from "./validate-crate/index.js";
 import { plugin as jsonOutputPlugin } from "./ro-crate-json-output/index.js";
 import { plugin as xlsxOutputPlugin } from "./ro-crate-xlsx-output/index.js";
 import { plugin as htmlOutputPlugin } from "./ro-crate-html-output/index.js";
+import { songbookHtmlPlugin } from "./chordpro-input/songbook_html.js";
 import { plugin as genericInputPlugin } from "./generic-input/index.js";
 import { plugin as docxInputPlugin } from "./docx-input/index.js";
 import { plugin as chordproInputPlugin } from "./chordpro-input/index.js";
@@ -25,6 +26,11 @@ export const PLUGINS = [
   jsonOutputPlugin,
   xlsxOutputPlugin,
   htmlOutputPlugin,
+  // Reads ro-crate-metadata.json (written above by jsonOutputPlugin) and,
+  // only for a chordpro-mode build, writes a second, domain-specific HTML
+  // page alongside the generic ro-crate-preview.html — see
+  // chordpro-input/songbook_html.js and its SPEC.md section.
+  songbookHtmlPlugin,
 ];
 
 // Input-mode plugins are a separate registry from PLUGINS above: they're
