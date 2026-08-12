@@ -577,14 +577,19 @@ changing the instrument mid-preview via `#print-instrument-select` redraws the s
   An entry with no matching song has no page to print, so it's skipped from the song pages,
   but stays on the contents page with "—" in place of a page number.
 
-**Page layout.** Every song is fitted onto exactly one A4 page via `fitPrintSongPage`
-(§12's `fitTextToBox`, against a fixed A4-sized box instead of the viewport) — not clipped.
-`.print-page`'s physical A4 sizing (width, padding) is applied unconditionally, **not**
-confined to `@media print`, so `fitPrintSongPage` can measure and fit against the page's
-real size immediately, before the reader ever asks to print; a size that only existed once
-print CSS took effect would be invisible to JS run beforehand. `@media print` itself only
-adds `page-break-after`, hides the on-screen banner/fullscreen button, and zeroes `@page`
-margins.
+**Page layout.** Each of a song's own sections (`renderSong()`'s own `pages` array — length 1
+unless the source has `{new_page}`/`{np}` directives, in which case one A4 page per section:
+`buildNormalPrintSongPages`, not a change to `buildSongPrintPage` itself, which still only
+ever builds one page from one section) is fitted onto exactly one A4 page via
+`fitPrintSongPage` (§12's `fitTextToBox`, against a fixed A4-sized box instead of the
+viewport) — not clipped. None of these per-section pages carry a "(continued)" note: unlike
+large print's own auto-split continuation (below), a `{new_page}` break is a deliberate,
+authored one, and every section starts clean. `.print-page`'s physical A4 sizing (width,
+padding) is applied unconditionally, **not** confined to `@media print`, so `fitPrintSongPage`
+can measure and fit against the page's real size immediately, before the reader ever asks to
+print; a size that only existed once print CSS took effect would be invisible to JS run
+beforehand. `@media print` itself only adds `page-break-after`, hides the on-screen
+banner/fullscreen button, and zeroes `@page` margins.
 
 > **Keep in sync by hand:** `PRINT_PAGE_PADDING_MM` (`songbook_html.js`, currently `10`) and
 > the `.print-page { padding: ... }` value in the `<style>` block must match exactly. They
@@ -613,6 +618,118 @@ least one diagram also gets a small "Chords for [instrument]" note under its own
 (`.print-chords-for-note`), independent of whether the book-level subtitle is showing, since
 not every song is guaranteed a shape for every chord it uses; both notes' rendered heights
 are subtracted from `fitPrintSongPage`'s own budget.
+
+**Large print.** `#large-print-checkbox` in the print banner — checked, every song gets two
+physical pages instead of one, at a font size roughly double what `fitPrintSongPage` would
+have found for the same content on a single page. Read directly wherever it matters
+(`largePrintCheckbox.checked`, in `showPrintSong`/`showPrintBook`/`showPrintSetlist`) rather
+than kept in a separate synced variable — there's only the one checkbox, and its own checked
+state is unaffected by `#print-view` being hidden/shown, so there's nothing to restore on
+re-entry either (unlike `currentInstrument`, which two different selects need kept in sync).
+Changing it while already in print view redraws via `currentPrintRebuild`, the same as
+changing the instrument does.
+
+*Building the spread.* `buildLargePrintSongPages(name, rendered, firstPageNumber)` builds
+two-page pairs, one pair per section in `rendered.pages` — almost always length 1, but not
+when the source has its own `{new_page}`/`{np}` directives (chordprobook's `renderSong`,
+which splits on exactly that); normal print mode joins every section into one continuous flow
+on one page regardless (`buildSongPrintPage`'s own `body.innerHTML =
+rendered.pages.join("\n")`), but large print gives each section its own independent spread,
+each with its own font-size fit and its own split point.
+
+Page 1 of a pair is built with the section's full rendered content, the same as a normal
+print page; page 2 is built with none of its own (`{ ...sectionRendered, pages: [""] }`).
+`fitLargePrintSongPages(page1, page2)` is what moves whatever doesn't fit on page 1 onto page
+2 — and, unlike every other fit in this file, can't just reuse `fitTextToBox`: that fits one
+box to one height; this has to fit one piece of content across *two* independently-sized
+boxes (page 1's own `availableHeight1`, page 2's own `availableHeight2` — usually close but
+not identical, since page 2 alone carries a "(continued)" note) and, more importantly, has to
+choose *where* to split it.
+
+Two earlier versions of this got the split itself wrong, in different ways. The first cut at
+an arbitrary height (the midpoint of a box fit to twice one page's height) — landing mid-line
+or mid-chorus, visually chopping a heading or lyric in half across the page break. The second
+fixed *where* to cut (walking children to find a clean boundary, below) but still built page 2
+as a *second*, separate rendering of the identical markup, relying on a computed clip+negative-
+margin to make it show "the other half" — which depends on that second copy reflowing
+pixel-for-pixel identically to the first one's independent layout; small divergences between
+them chopped text right at the seam regardless of how carefully the boundary was chosen, and
+any section whose content didn't fit within the *combined* two-page budget overflowed
+invisibly past page 2's own clip, forcing the browser to insert its own extra, untracked
+physical page with no page number and no "(continued)" note — breaking the odd/even alignment
+(below) for every song after it.
+
+The current version avoids both by moving the actual DOM nodes instead of measuring a height
+to clip. `trySplit(fontPx)` walks `.print-song-body-content`'s top-level children (`renderSong()`'s
+own `.heading`/`.line`/`blockquote`/`pre`/`img` chunks) and finds the largest prefix that fits
+within `availableHeight1` without cutting one in half — a whole `blockquote` (chorus/bridge:
+several lines wrapped in one element) moves to page 2 entirely rather than being split
+mid-block, which is the case that most obviously exposed a bad cut. It uses each child's own
+`offsetTop` (not a running sum of `offsetHeight`, which would silently drift from the real
+rendered layout once margins between adjacent siblings collapse) to find that boundary, and
+checks that everything after it still fits within `availableHeight2` (`remaining <=
+availableHeight2`) before accepting a given font size — the search itself is over font size
+exactly like `fitTextToBox` (same `FIT_MIN_FONT_PX`/`FIT_MAX_FONT_PX` bounds), just with this
+two-sided `fits` check standing in for `fitTextToBox`'s own single-box comparison. Once the
+search settles on a font size and a cut index, the actual children from that index onward are
+moved — `page2.printSongBodyContent.appendChild(child)` for each — directly off page 1's own
+(real, already-measured) content onto page 2's. Neither page's `.print-song-body` needs an
+explicit height or `overflow: hidden` at all: page 1 only ever keeps the children just proven
+to fit its own budget, and page 2 only ever receives the ones proven to fit its own — there's
+nothing left over on either side to clip, and (short of a single section too long to fit two
+pages combined at any font size down to the floor — the same accepted edge case
+`fitTextToBox` already has for a single page, not new here) nothing left to silently overflow
+onto an untracked extra page either.
+
+Building page 2 by moving nodes rather than duplicating markup and clipping it — and not one
+wide multi-column box spanning two sheets, an idea considered and discarded before any of
+this was written — avoids the fragility of two independently-laid-out copies needing to agree
+pixel-for-pixel, and the unreliability of CSS multi-column fragmentation across physical
+printed pages (columns distribute across a page's own overflow height, not sideways across a
+page *width* wider than the paper itself, which is what two side-by-side pages would need).
+The second page of every pair carries a small "(continued)" note (`buildSongPrintPage`'s own
+`continued` parameter) so a page landing on its own — photocopied, separated from its spread —
+still reads as the back half of a longer song rather than a different, truncated one; a fresh
+`{new_page}` section deliberately does *not* get this treatment on its own first page, since
+it's meant to start clean.
+
+> **Test coverage gap:** `trySplit`'s own boundary-walking (never cutting a child element in
+> half, and the node move that follows it) isn't exercised by `test-songbook-html.mjs`'s fake
+> DOM — its `document.createElement` never populates a real `.children` tree from an
+> `.innerHTML` string (this file's own header comment), so every dynamically-built print
+> page's `.print-song-body-content.children` is always empty in a test, regardless of what
+> was assigned to `.innerHTML`. With no children to walk, there's nothing to move either —
+> `test-songbook-html.mjs`'s own large-print tests assert exactly that (both pages'
+> `.children` staying empty), with a comment pointing back here rather than re-explaining it.
+> Confirming the boundary-walking itself avoids a bad cut, and that nothing overflows onto an
+> untracked page, is a real-browser concern, same as this file's other layout caveats (§10,
+> §11).
+
+*Facing-page alignment.* `#facing-pages-checkbox` in the print banner, checked by default (the
+markup's own `checked` attribute, not JS) — PT: "keep songs on facing pages for double-sided
+printing." `alignSongStart(pageNumber, pageCount, keepFacingPages)` decides, for *every* song
+in sequence (`showPrintBook`/`showPrintSetlist`'s own running `pageNumber`), whether a blank
+filler page has to go immediately in front of it: an even page and the odd page immediately
+after it are what a reader actually sees together when a bound book is opened (page 1 is
+always alone, on the right); an odd-then-even pair never is, since it straddles two different
+spreads instead of forming one. A single-page song is skipped entirely regardless of the
+checkbox — there's no spread to protect, so aligning it would just scatter blank pages through
+the book for no benefit — and unchecking the box skips every song, including multi-page ones.
+When a blank page is needed, `buildBlankPrintPage()` (explicitly marked "This page is
+intentionally blank" — the same convention real printed books use, so it doesn't read as a
+mistake) is inserted, and the song's own first page moves from `pageNumber` to `pageNumber +
+1`.
+
+This has to be a per-song check, not a once-per-book one, because normal print's own per-song
+page count varies now — a `{new_page}` song (`buildNormalPrintSongPages`, above) can be any
+length, so *any* song along the way, not only the first, can land on an odd start after an
+earlier odd-length one (Song A, one page; Song B, two — Song B's own start is what needs
+checking, not the book's). Large print doesn't have this per-song variability (every song is
+always exactly two pages, or two pages per `{new_page}` section —
+`buildLargePrintSongPages`), so in practice `alignSongStart` only ever inserts a blank there
+for the first song in the whole book; every later one is already aligned automatically, since
+an even page count added to an even start always lands on another even number — but the check
+itself doesn't need to know that distinction; it re-verifies before every song regardless.
 
 ## 14. Visual design
 

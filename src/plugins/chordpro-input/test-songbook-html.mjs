@@ -157,6 +157,7 @@ function makeElement() {
     textContent: "",
     innerHTML: "",
     disabled: false,
+    checked: false,
     title: "",
     children: [],
     style: {},
@@ -171,6 +172,7 @@ function makeElement() {
     // these (as plain properties, or as getters via Object.defineProperty
     // when a value needs to react to style.fontSize being set).
     offsetHeight: 0,
+    offsetTop: 0,
     offsetWidth: 0,
     clientWidth: 0,
     scrollHeight: 0,
@@ -263,6 +265,13 @@ function fakeDocument(crateJson, { rejectFullscreen = false } = {}) {
     "print-now-button": makeElement(),
     "done-printing-button": makeElement(),
     "print-instrument-select": makeElement(),
+    "large-print-checkbox": makeElement(),
+    // checked: true to match the real markup's own `checked` attribute
+    // (<input type="checkbox" id="facing-pages-checkbox" checked>) — unlike
+    // every other fake element here, whose defaults all match an
+    // *unrendered* real one, since HTML attributes aren't something this
+    // fake document parses at all (this file's own header comment).
+    "facing-pages-checkbox": { ...makeElement(), checked: true },
     "fullscreen-button": makeElement(),
     "view-setlists-button": makeElement(),
     "setlist-index-view": makeElement(),
@@ -790,7 +799,7 @@ function isFittedFontSize(value) {
 
   const [page] = elements["print-content"].children;
   assert.equal(page.printSongTitleElement.textContent, "Amazing Grace");
-  assert.ok(page.printSongBody.innerHTML.includes('<span class="inlineChord">[G]</span>'));
+  assert.ok(page.printSongBodyContent.innerHTML.includes('<span class="inlineChord">[G]</span>'));
   // Fit onto its own A4 page the same way the on-screen view fits the
   // viewport — not clipped, not left to overflow onto a second page. The
   // exact resulting size is fitTextToBox's own concern, already covered by
@@ -897,6 +906,402 @@ function isFittedFontSize(value) {
   // The 61st page overall — 2 contents pages + the first song.
   const firstSongPageNumber = firstSong.children.find((c) => c.className === "print-page-number");
   assert.equal(firstSongPageNumber.textContent, "3");
+}
+
+/* ---------- {new_page} in normal print: one physical page per section (SPEC.md §13) ---------- */
+
+{
+  // A song with two {new_page} directives (three sections) prints as three
+  // separate pages, standalone — not joined onto one the way the on-screen
+  // view and this same song's rendered.pages.join("\n") would (renderSong's
+  // own `pages` array is what both this and the large-print version below
+  // walk instead of joining).
+  const { doc, elements } = fakeDocument({
+    "@graph": [{
+      "@id": "medley.cho.txt", "@type": "MusicComposition", name: "Medley",
+      text: "{title: Medley}\n\n[C]First section\n{new_page}\n[D]Second section\n{new_page}\n[E]Third section",
+    }],
+  });
+  initSongbookApp(doc, fakeWindow());
+  songLink(elements, 0).click();
+  elements["print-song-button"].click();
+
+  assert.equal(elements["print-content"].children.length, 3);
+  const [page1, page2, page3] = elements["print-content"].children;
+  assert.ok(page1.printSongBodyContent.innerHTML.includes('<span class="inlineChord">[C]</span>'));
+  assert.ok(!page1.printSongBodyContent.innerHTML.includes("Second section"));
+  assert.ok(page2.printSongBodyContent.innerHTML.includes('<span class="inlineChord">[D]</span>'));
+  assert.ok(!page2.printSongBodyContent.innerHTML.includes("First section"));
+  assert.ok(page3.printSongBodyContent.innerHTML.includes('<span class="inlineChord">[E]</span>'));
+  // No page numbers (standalone print, same as a single-section song) and
+  // no "(continued)" notes either — each {new_page} break is a deliberate,
+  // authored page, not an auto-split continuation (buildNormalPrintSongPages'
+  // own comment).
+  assert.equal(page1.children.find((c) => c.className === "print-page-number"), undefined);
+  assert.equal(page1.printContinuedNoteElement, null);
+  assert.equal(page2.printContinuedNoteElement, null);
+  assert.equal(page3.printContinuedNoteElement, null);
+  assert.ok(isFittedFontSize(page1.printSongBody.style.fontSize));
+}
+
+{
+  // The same accounting inside a whole-book print — a three-section song's
+  // own page numbers advance by its own actual page count (3 here), not a
+  // flat 1, so the *next* song's number still comes out correctly.
+  const { doc, elements } = fakeDocument({
+    "@graph": [
+      {
+        "@id": "medley.cho.txt", "@type": "MusicComposition", name: "Medley",
+        text: "{title: Medley}\n\n[C]First\n{new_page}\n[D]Second\n{new_page}\n[E]Third",
+      },
+      { "@id": "b.cho.txt", "@type": "MusicComposition", name: "Song B", text: "{title: Song B}\n\n[F]Verse" },
+    ],
+  });
+  initSongbookApp(doc, fakeWindow());
+  elements["print-book-button"].click();
+
+  // 1 front page + Medley's 3 pages + Song B's 1 page = 5.
+  assert.equal(elements["print-content"].children.length, 5);
+  const tocEntries = elements["print-content"].children[0].children[2].children;
+  assert.equal(tocEntries[0].children[1].textContent, "2"); // Medley: pages 2-4
+  assert.equal(tocEntries[1].children[1].textContent, "5"); // Song B: page 5
+  const pages = elements["print-content"].children;
+  const pageNumbers = pages.slice(1).map((p) => p.children.find((c) => c.className === "print-page-number").textContent);
+  assert.deepEqual(pageNumbers, ["2", "3", "4", "5"]);
+}
+
+/* ---------- #facing-pages-checkbox: keep multi-page songs on facing pages, normal print (SPEC.md §13) ---------- */
+
+{
+  // A single-page song (Song A) followed by a two-page one (Song B, via
+  // one {new_page} directive) — Song A's own page (2, already even) needs
+  // no alignment (single-page songs are always skipped — alignSongStart's
+  // own comment), but it leaves Song B's naive start (3) odd, which *does*
+  // need a blank page in front of it so Song B's own two pages land as a
+  // true facing-page spread. Checked by default (the real markup's own
+  // `checked` attribute — this fake DOM mirrors that specifically for this
+  // one element, see fakeDocument's own comment), so no explicit
+  // opt-in needed here.
+  const { doc, elements } = fakeDocument({
+    "@graph": [
+      { "@id": "a.cho.txt", "@type": "MusicComposition", name: "Song A", text: "{title: Song A}\n\n[C]Verse" },
+      {
+        "@id": "b.cho.txt", "@type": "MusicComposition", name: "Song B",
+        text: "{title: Song B}\n\n[D]First\n{new_page}\n[E]Second",
+      },
+    ],
+  });
+  initSongbookApp(doc, fakeWindow());
+  elements["print-book-button"].click();
+
+  // 1 front page + Song A's 1 page + 1 blank + Song B's 2 pages = 5.
+  assert.equal(elements["print-content"].children.length, 5);
+  const [frontPage, songA, blankPage, songBP1, songBP2] = elements["print-content"].children;
+  assert.ok(blankPage.className.includes("print-page-blank"));
+  assert.equal(blankPage.children.find((c) => c.className === "print-page-number"), undefined);
+  assert.equal(songA.printSongTitleElement.textContent, "Song A");
+  assert.equal(songBP1.printSongTitleElement.textContent, "Song B");
+
+  const tocEntries = frontPage.children[2].children;
+  assert.equal(tocEntries[0].children[1].textContent, "2"); // Song A
+  assert.equal(tocEntries[1].children[1].textContent, "4"); // Song B: pages 4-5, not 3-4
+
+  const pageNumbers = [songA, songBP1, songBP2].map(
+    (p) => p.children.find((c) => c.className === "print-page-number").textContent,
+  );
+  assert.deepEqual(pageNumbers, ["2", "4", "5"]);
+}
+
+{
+  // Same book, unchecked — Song B starts wherever it naturally falls (3,
+  // odd), no blank page inserted at all.
+  const { doc, elements } = fakeDocument({
+    "@graph": [
+      { "@id": "a.cho.txt", "@type": "MusicComposition", name: "Song A", text: "{title: Song A}\n\n[C]Verse" },
+      {
+        "@id": "b.cho.txt", "@type": "MusicComposition", name: "Song B",
+        text: "{title: Song B}\n\n[D]First\n{new_page}\n[E]Second",
+      },
+    ],
+  });
+  initSongbookApp(doc, fakeWindow());
+  elements["facing-pages-checkbox"].checked = false;
+  elements["print-book-button"].click();
+
+  // 1 front page + Song A's 1 page + Song B's 2 pages = 4 — no blank.
+  assert.equal(elements["print-content"].children.length, 4);
+  const tocEntries = elements["print-content"].children[0].children[2].children;
+  assert.equal(tocEntries[0].children[1].textContent, "2"); // Song A
+  assert.equal(tocEntries[1].children[1].textContent, "3"); // Song B: pages 3-4
+}
+
+{
+  // Unaffected by large print's own checkbox being on at the same time —
+  // both are independent settings, checked together here to confirm large
+  // print doesn't bypass this one (or vice versa).
+  const { doc, elements } = fakeDocument({
+    "@graph": [
+      { "@id": "a.cho.txt", "@type": "MusicComposition", name: "Song A", text: "{title: Song A}\n\n[C]Verse" },
+      { "@id": "b.cho.txt", "@type": "MusicComposition", name: "Song B", text: "{title: Song B}\n\n[D]Verse" },
+    ],
+  });
+  initSongbookApp(doc, fakeWindow());
+  elements["large-print-checkbox"].checked = true;
+  elements["facing-pages-checkbox"].checked = false;
+  elements["print-book-button"].click();
+
+  // Large print's own two-pages-per-song is unaffected by unchecking
+  // facing-pages — that's a per-song variability concern (alignSongStart's
+  // own comment) that large print doesn't have in the first place (every
+  // song is always exactly two pages here), not something this checkbox
+  // controls the *count* of.
+  assert.equal(elements["print-content"].children.length, 5); // 1 front + 2 songs * 2 pages
+}
+
+/* ---------- large print: every song on two pages, aligned to facing spreads (SPEC.md §13) ---------- */
+
+{
+  // Standalone single-song print (no book/contents page) — just two pages,
+  // no page numbers either way (same reasoning as the non-large-print
+  // case), the second carrying a "(continued)" note the first doesn't.
+  const { doc, elements } = fakeDocument(CRATE_JSON);
+  initSongbookApp(doc, fakeWindow());
+  songLink(elements, 0).click(); // Amazing Grace
+  elements["large-print-checkbox"].checked = true;
+  elements["large-print-checkbox"].dispatch("change");
+  elements["print-song-button"].click();
+
+  assert.equal(elements["print-content"].children.length, 2);
+  const [page1, page2] = elements["print-content"].children;
+  assert.equal(page1.printSongTitleElement.textContent, "Amazing Grace");
+  assert.equal(page2.printSongTitleElement.textContent, "Amazing Grace");
+  assert.equal(page1.printContinuedNoteElement, null);
+  assert.equal(page2.printContinuedNoteElement.textContent, "(continued)");
+  assert.equal(page1.children.find((c) => c.className === "print-page-number"), undefined);
+  assert.equal(page2.children.find((c) => c.className === "print-page-number"), undefined);
+
+  // fitLargePrintSongPages sets font-size on *printSongBodyContent*, the
+  // container it actually walks/measures — .print-song-body itself is
+  // never touched at all now (no clip, no offset — page 2 only ever gets
+  // whatever nodes page 1 didn't keep, moved there directly, so there's
+  // nothing left over to clip in the first place).
+  assert.ok(isFittedFontSize(page1.printSongBodyContent.style.fontSize));
+  assert.equal(page1.printSongBodyContent.style.fontSize, page2.printSongBodyContent.style.fontSize);
+  assert.equal(page1.printSongBody.style.overflow, undefined);
+  assert.equal(page1.printSongBody.style.height, undefined);
+  // The real split (trySplit, walking printSongBodyContent's own top-level
+  // children to find the largest prefix that fits without cutting one in
+  // half, then moving whatever's left onto page 2) can't be exercised
+  // here — this fake DOM's own .innerHTML setter never populates a real
+  // .children tree from the string it's given (this file's own header
+  // comment), so printSongBodyContent.children is always empty for a
+  // dynamically-built print page, regardless of what its .innerHTML was
+  // set to. With nothing to walk, there's nothing to move either — both
+  // pages' own printSongBodyContent.children stay empty, a safe (if not
+  // useful, for this specific test) no-op rather than a crash. Confirming
+  // the boundary-walking itself avoids a bad cut is a real-browser
+  // concern (SPEC.md §13), same as this suite's other layout caveats.
+  assert.equal(page1.printSongBodyContent.children.length, 0);
+  assert.equal(page2.printSongBodyContent.children.length, 0);
+}
+
+{
+  // A song already split into sections at the source (ChordPro's own
+  // {new_page} directive) — large print gives *each* section its own
+  // two-page spread, rather than joining every section into one bigger
+  // one the way normal print does (buildSongPrintPage's own
+  // body.innerHTML = rendered.pages.join("\n")). Two {new_page}-separated
+  // sections means two independent spreads: 4 physical pages, not 2.
+  const { doc, elements } = fakeDocument({
+    "@graph": [{
+      "@id": "medley.cho.txt", "@type": "MusicComposition", name: "Medley",
+      text: "{title: Medley}\n\n[C]First section\n{new_page}\n[D]Second section\n{new_page}\n[E]Third section",
+    }],
+  });
+  initSongbookApp(doc, fakeWindow());
+  songLink(elements, 0).click();
+  elements["large-print-checkbox"].checked = true;
+  elements["large-print-checkbox"].dispatch("change");
+  elements["print-song-button"].click();
+
+  // 3 sections * 2 pages each = 6 — not the flat 2 a fixed-pages-per-song
+  // assumption would have produced.
+  assert.equal(elements["print-content"].children.length, 6);
+  const [s1p1, s1p2, s2p1, s2p2, s3p1, s3p2] = elements["print-content"].children;
+
+  // Each section only carries its own material, not the whole song joined
+  // — s1p1 (or its own continuation, s1p2) never sees section 2 or 3's
+  // text, and vice versa.
+  assert.ok(s1p1.printSongBodyContent.innerHTML.includes('<span class="inlineChord">[C]</span>'));
+  assert.ok(!s1p1.printSongBodyContent.innerHTML.includes("Second section"));
+  assert.ok(s2p1.printSongBodyContent.innerHTML.includes('<span class="inlineChord">[D]</span>'));
+  assert.ok(!s2p1.printSongBodyContent.innerHTML.includes("First section"));
+  assert.ok(s3p1.printSongBodyContent.innerHTML.includes('<span class="inlineChord">[E]</span>'));
+
+  // "(continued)" only on the *second* page of each section's own pair —
+  // a new {new_page} section starts fresh, not as a continuation of the
+  // section before it.
+  assert.equal(s1p1.printContinuedNoteElement, null);
+  assert.equal(s1p2.printContinuedNoteElement.textContent, "(continued)");
+  assert.equal(s2p1.printContinuedNoteElement, null);
+  assert.equal(s2p2.printContinuedNoteElement.textContent, "(continued)");
+  assert.equal(s3p1.printContinuedNoteElement, null);
+  assert.equal(s3p2.printContinuedNoteElement.textContent, "(continued)");
+
+  // No page numbers here either (standalone print, same as the single-
+  // section case above), but each pair is still independently fitted —
+  // three sections, three separate searches (even though this fake DOM's
+  // own lack of real content measurement, see the single-section test's
+  // own comment, means they land on the same value here).
+  assert.ok(isFittedFontSize(s1p1.printSongBodyContent.style.fontSize));
+  assert.ok(isFittedFontSize(s2p1.printSongBodyContent.style.fontSize));
+  assert.ok(isFittedFontSize(s3p1.printSongBodyContent.style.fontSize));
+}
+
+{
+  // The same {new_page} accounting inside a whole-book print — a
+  // multi-section song's own page numbers advance by its own actual page
+  // count (2 sections * 2 = 4 here), not a flat 2, so the *next* song's
+  // number still comes out correctly.
+  const { doc, elements } = fakeDocument({
+    "@graph": [
+      {
+        "@id": "medley.cho.txt", "@type": "MusicComposition", name: "Medley",
+        text: "{title: Medley}\n\n[C]First\n{new_page}\n[D]Second",
+      },
+      { "@id": "b.cho.txt", "@type": "MusicComposition", name: "Song B", text: "{title: Song B}\n\n[E]Verse" },
+    ],
+  });
+  initSongbookApp(doc, fakeWindow());
+  elements["large-print-checkbox"].checked = true;
+  elements["print-book-button"].click();
+
+  // 1 front page + Medley's 4 pages + Song B's 2 pages = 7.
+  assert.equal(elements["print-content"].children.length, 7);
+  const tocEntries = elements["print-content"].children[0].children[2].children;
+  assert.equal(tocEntries[0].children[1].textContent, "2"); // Medley: pages 2-5
+  assert.equal(tocEntries[1].children[1].textContent, "6"); // Song B: pages 6-7
+}
+
+{
+  // Whole-book print, large print on — front matter is 1 page (2 songs,
+  // well under TOC_SPLIT_THRESHOLD), so 1 + 1 = 2 is already even: the
+  // first song lands straight on page 2 (its own spread is 2-3) with no
+  // blank filler page needed, matching PT's own example exactly.
+  const { doc, elements } = fakeDocument(CRATE_JSON);
+  initSongbookApp(doc, fakeWindow());
+
+  elements["large-print-checkbox"].checked = true;
+  elements["print-book-button"].click();
+
+  // 1 front page + 2 songs * 2 pages each = 5. No blank filler page (see
+  // above) — this count is the regression test for that.
+  assert.equal(elements["print-content"].children.length, 5);
+  const [frontPage, songOneP1, songOneP2, songTwoP1, songTwoP2] = elements["print-content"].children;
+
+  // frontPage.children: [h1, "Contents" h2, <ol>, page-number] — no
+  // subtitle here, since no instrument is selected (matching the
+  // non-large-print whole-book test's own structure above).
+  const tocEntries = frontPage.children[2].children;
+  assert.equal(tocEntries[0].children[1].textContent, "2"); // Amazing Grace: pages 2-3
+  assert.equal(tocEntries[1].children[1].textContent, "4"); // Universe: pages 4-5
+
+  assert.equal(songOneP1.printSongTitleElement.textContent, "Amazing Grace");
+  assert.equal(songOneP2.printContinuedNoteElement.textContent, "(continued)");
+  const songOneP1Number = songOneP1.children.find((c) => c.className === "print-page-number");
+  const songOneP2Number = songOneP2.children.find((c) => c.className === "print-page-number");
+  assert.equal(songOneP1Number.textContent, "2");
+  assert.equal(songOneP2Number.textContent, "3");
+  const songTwoP1Number = songTwoP1.children.find((c) => c.className === "print-page-number");
+  assert.equal(songTwoP1Number.textContent, "4");
+
+  // Unchecking and rebuilding goes straight back to one page per song —
+  // the checkbox's own change handler re-invokes currentPrintRebuild(), the
+  // same way #print-instrument-select's does.
+  elements["large-print-checkbox"].checked = false;
+  elements["large-print-checkbox"].dispatch("change");
+  assert.equal(elements["print-content"].children.length, 3); // 1 front + 2 songs
+}
+
+{
+  // A front-matter page *count* that's itself even (2 contents pages, for
+  // more than TOC_SPLIT_THRESHOLD entries) makes the naive first-song page
+  // (1 + 2 = 3) odd — large print's own alignment then has to insert one
+  // blank filler page to push the first song from 3 to 4, an even start.
+  const manySongs = Array.from({ length: 51 }, (_, i) => ({
+    "@id": `song-${String(i).padStart(2, "0")}.cho.txt`, "@type": "MusicComposition",
+    name: `Song ${String(i).padStart(2, "0")}`, text: `{title: Song ${i}}\n\nJust words, no chords.`,
+  }));
+  const { doc, elements } = fakeDocument({ "@graph": manySongs });
+  initSongbookApp(doc, fakeWindow());
+
+  elements["large-print-checkbox"].checked = true;
+  elements["print-book-button"].click();
+
+  // 2 contents pages + 1 blank filler + 51 songs * 2 pages = 105.
+  assert.equal(elements["print-content"].children.length, 105);
+  const [tocPage1, tocPage2, blankPage, firstSongP1] = elements["print-content"].children;
+  assert.ok(tocPage1.className.includes("print-toc"));
+  assert.ok(tocPage2.className.includes("print-toc"));
+  assert.ok(blankPage.className.includes("print-page-blank"));
+  assert.equal(blankPage.children.find((c) => c.className === "print-page-number"), undefined);
+
+  const firstEntryPageNumber = tocPage1.children[2].children[0].children[1];
+  assert.equal(firstEntryPageNumber.textContent, "4");
+  const firstSongP1Number = firstSongP1.children.find((c) => c.className === "print-page-number");
+  assert.equal(firstSongP1Number.textContent, "4");
+}
+
+{
+  // Setlist print, large print on, with the unresolved entry mixed in
+  // (SETLIST_CRATE_JSON: exact, fuzzy, ambiguous, then unresolved — SPEC.md
+  // §6.1) — the unresolved entry contributes no pages at all (large print
+  // or not), so the three resolved entries still get page numbers two
+  // apart, not four, and the unresolved one still shows "—", never a
+  // made-up number.
+  const { doc, elements } = fakeDocument(SETLIST_CRATE_JSON);
+  initSongbookApp(doc, fakeWindow());
+  elements["large-print-checkbox"].checked = true;
+  setlistLink(elements, 0).click();
+  elements["print-setlist-button"].click();
+
+  // 1 front page + 3 resolved entries * 2 pages each = 7.
+  assert.equal(elements["print-content"].children.length, 7);
+  const [frontPage, pageA1, pageA2, pageB1, , pageC1] = elements["print-content"].children;
+  assert.equal(frontPage.children[0].textContent, "Friday Gig");
+
+  const tocEntries = frontPage.children[2].children;
+  assert.equal(tocEntries[0].children[1].textContent, "2"); // Song A: pages 2-3
+  assert.equal(tocEntries[1].children[1].textContent, "4"); // Song B (capo 2): pages 4-5
+  assert.equal(tocEntries[2].children[1].textContent, "6"); // Songg A (ambiguous): pages 6-7
+  assert.equal(tocEntries[3].children[1].textContent, "—"); // Unknown Song: unresolved
+
+  assert.equal(pageA1.printSongTitleElement.textContent, "Song A");
+  assert.equal(pageA2.printContinuedNoteElement.textContent, "(continued)");
+  assert.equal(pageB1.printSongTitleElement.textContent, "Song B (capo 2)");
+  // Song B is key C; capo 2 shifts it down to Bb — the entry's own
+  // override, not whatever's currently selected on screen. Present in the
+  // markup regardless of fitLargePrintSongPages' own clipping, which is
+  // visual (CSS height/overflow) rather than a change to the content itself.
+  assert.ok(pageB1.printSongBodyContent.innerHTML.includes('<span class="inlineChord">[Bb]</span>'));
+  assert.equal(pageC1.printSongTitleElement.textContent, "Songg A");
+}
+
+{
+  // No explicit sync code needed for this (unlike #print-instrument-select,
+  // which currentInstrument keeps in sync across two different selects) —
+  // a checkbox's own checked state is just never reset by leaving/
+  // re-entering print mode, so it stays checked on its own.
+  const { doc, elements } = fakeDocument(CRATE_JSON);
+  initSongbookApp(doc, fakeWindow());
+
+  elements["large-print-checkbox"].checked = true;
+  elements["large-print-checkbox"].dispatch("change");
+  elements["done-printing-button"].click();
+  assert.equal(isHidden(elements["print-view"]), true);
+
+  elements["print-book-button"].click();
+  assert.equal(elements["large-print-checkbox"].checked, true);
 }
 
 {
@@ -1427,7 +1832,7 @@ function isFittedFontSize(value) {
   assert.equal(pageB.printSongTitleElement.textContent, "Song B (capo 2)");
   // Song B is key C; capo 2 shifts it down to Bb — the entry's own
   // override, not whatever's currently selected on screen.
-  assert.ok(pageB.printSongBody.innerHTML.includes('<span class="inlineChord">[Bb]</span>'));
+  assert.ok(pageB.printSongBodyContent.innerHTML.includes('<span class="inlineChord">[Bb]</span>'));
   assert.equal(pageC.printSongTitleElement.textContent, "Songg A");
 
   // "Done printing" returns to the setlist that was open, not the list —
@@ -1521,6 +1926,8 @@ function isFittedFontSize(value) {
   assert.ok(html.includes('<select id="capo-select"'));
   assert.ok(html.includes('<select id="instrument-select"'));
   assert.ok(html.includes('<div id="chord-diagrams"'));
+  assert.ok(html.includes('<input type="checkbox" id="large-print-checkbox"'));
+  assert.ok(html.includes('<input type="checkbox" id="facing-pages-checkbox" checked'));
   assert.ok(!html.includes("type=\"module\"")); // file:// must work — see SPEC.md's UI section
 
   // The chordprobook bundle is embedded, and defines the globals the app

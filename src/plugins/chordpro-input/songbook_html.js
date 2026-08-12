@@ -165,6 +165,8 @@ export function initSongbookApp(document, window) {
   const printNowButton = document.getElementById("print-now-button");
   const donePrintingButton = document.getElementById("done-printing-button");
   const printInstrumentSelect = document.getElementById("print-instrument-select");
+  const largePrintCheckbox = document.getElementById("large-print-checkbox");
+  const facingPagesCheckbox = document.getElementById("facing-pages-checkbox");
   const fullscreenButton = document.getElementById("fullscreen-button");
   const viewSetlistsButton = document.getElementById("view-setlists-button");
   const setlistIndexView = document.getElementById("setlist-index-view");
@@ -642,15 +644,21 @@ export function initSongbookApp(document, window) {
   // unlike window.open(), prints whatever the *current* window is showing,
   // which is why replacing the screen is enough — no popup is needed at all.
   //
-  // Every song gets exactly one physical page, same as chordprosite's own
+  // Every section of a song gets exactly one physical page — almost always
+  // the whole song, since renderSong()'s own `pages` array (one entry per
+  // {new_page} directive in the source) is length 1 unless the source
+  // asks for more (buildNormalPrintSongPages) — same as chordprosite's own
   // version: not by clipping it (chordprosite doesn't do that either — an
   // earlier version of this feature assumed it did, and let a long song
   // spill onto a second page instead, which was simply a misreading of the
   // original), but by fitting it to the page with the exact same
   // fitTextToBox() the on-screen view uses, applied to a fixed A4-sized box
   // instead of the viewport. That's also what makes the table of contents'
-  // page numbers below trustworthy: they're only knowable at all because
-  // every song is guaranteed to land on exactly one page.
+  // page numbers below trustworthy: every song's own page count is known
+  // up front (buildNormalPrintSongPages/buildLargePrintSongPages both
+  // return exactly as many pages as they were going to build, before any
+  // page is fitted), so later songs' numbers can be computed correctly
+  // without waiting to see how any of it actually renders.
   //
   // .print-page's own physical sizing (width/padding, below in the <style>
   // block) is deliberately not confined to @media print — chordprosite's
@@ -702,7 +710,13 @@ export function initSongbookApp(document, window) {
   // showPrintSetlist — a standalone single-song print (showPrintSong) has
   // no book/contents page for a number to refer back to, so it omits one
   // rather than printing a lone, meaningless "1".
-  function buildSongPrintPage(name, rendered, pageNumber = null) {
+  //
+  // continued (false by default) is only ever true for a large-print
+  // song's second page (buildLargePrintSongPages, below) — a small "(cont-
+  // inued)" note under the title, so a page landing on its own (photocopied,
+  // separated from the rest of a spread) doesn't read as a different,
+  // truncated song rather than the back half of one that's two pages long.
+  function buildSongPrintPage(name, rendered, pageNumber = null, continued = false) {
     const page = document.createElement("div");
     page.className = "print-page";
     const heading = document.createElement("h1");
@@ -710,11 +724,32 @@ export function initSongbookApp(document, window) {
     heading.textContent = name;
     page.appendChild(heading);
 
+    let continuedNote = null;
+    if (continued) {
+      continuedNote = document.createElement("p");
+      continuedNote.className = "print-continued-note";
+      continuedNote.textContent = "(continued)";
+      page.appendChild(continuedNote);
+    }
+
     const row = document.createElement("div");
     row.className = "print-song-row";
     const body = document.createElement("div");
     body.className = "print-song-body";
-    body.innerHTML = rendered.pages.join("\n");
+    // The actual rendered lyrics live in this inner element, not directly
+    // in .print-song-body itself — large print (fitLargePrintSongPages)
+    // needs a container holding *only* renderSong()'s own top-level chunks
+    // (.heading/.line/blockquote/pre/img), so it can walk them and move
+    // whichever ones don't fit onto page 2's own .print-song-body-content
+    // directly, without also picking up unrelated siblings .print-song-
+    // body might otherwise hold. Normal print (fitPrintSongPage) never
+    // reaches into this at all — its own scrollHeight still bubbles up
+    // from this same content regardless of how many divs it's nested
+    // inside, so the extra nesting is invisible to it.
+    const bodyContent = document.createElement("div");
+    bodyContent.className = "print-song-body-content";
+    bodyContent.innerHTML = rendered.pages.join("\n");
+    body.appendChild(bodyContent);
     row.appendChild(body);
 
     const diagramElements = buildChordDiagramElements(rendered.chordsUsed);
@@ -734,8 +769,10 @@ export function initSongbookApp(document, window) {
     page.appendChild(row);
     if (pageNumber !== null) addPageNumber(page, pageNumber);
     page.printSongTitleElement = heading;
+    page.printContinuedNoteElement = continuedNote;
     page.printChordsForNoteElement = chordsForNote;
     page.printSongBody = body;
+    page.printSongBodyContent = bodyContent;
     return page;
   }
 
@@ -755,6 +792,201 @@ export function initSongbookApp(document, window) {
     const chordsForHeight = page.printChordsForNoteElement ? page.printChordsForNoteElement.offsetHeight : 0;
     const availableHeight = PRINT_CONTENT_HEIGHT_PX - page.printSongTitleElement.offsetHeight - chordsForHeight;
     fitTextToBox(page.printSongBody, availableHeight, page.printSongBody.clientWidth);
+  }
+
+  // A song's own {new_page}/{np} directives (renderSong()'s own `pages`
+  // array — almost always length 1, but not always) get one physical page
+  // each, rather than being joined into one continuous flow on a single
+  // page the way a plain body.innerHTML = rendered.pages.join("\n") would
+  // (buildSongPrintPage builds one page from exactly one rendered.pages
+  // entry, which is what makes this just a map over them rather than a
+  // change to that function itself). No "(continued)" note on any of
+  // them — unlike large print's own per-section pairs (below), where the
+  // second page of a pair really is an auto-split continuation of content
+  // that didn't fit, each of *these* pages is a deliberate, authored break
+  // in the source; every one of them starts clean. firstPageNumber is a
+  // single starting number (or null for a standalone print with no book
+  // context — SPEC.md §13); each section after the first advances it by 1,
+  // the same as advancing to the next song would.
+  function buildNormalPrintSongPages(name, rendered, firstPageNumber) {
+    const sections = rendered.pages.length ? rendered.pages : [""];
+    return sections.map((sectionHtml, sectionIndex) => {
+      const sectionRendered = { ...rendered, pages: [sectionHtml] };
+      const pageNumber = firstPageNumber === null ? null : firstPageNumber + sectionIndex;
+      return buildSongPrintPage(name, sectionRendered, pageNumber);
+    });
+  }
+
+  // Large print: every song spans two physical pages instead of one,
+  // showing roughly double the text size for the same content — not by
+  // literally doubling the font-size number, but by fitting the *whole*
+  // song against a box twice as tall as one printed page (fitTextToBox is
+  // reused unchanged for this — see fitLargePrintSongPages below), which
+  // naturally lands on a font size well above what fitPrintSongPage would
+  // have found for the same song on one page, since it's now allowed to
+  // take up to twice the room.
+  //
+  // Page 1 of each pair is built from buildSongPrintPage as normal, holding
+  // the section's full rendered content; page 2 starts with none of its
+  // own — fitLargePrintSongPages (below) moves whatever doesn't fit on
+  // page 1 onto page 2 directly, once page 1's own split point is known.
+  // Building page 2 with a *second, separate rendering* of the same markup
+  // and relying on a computed clip+offset to show "the other half" (an
+  // earlier version of this did exactly that) depends on that second copy
+  // reflowing pixel-for-pixel identically to the first — page 2 held
+  // identical HTML, but was still laid out independently, and small
+  // divergences there chopped text right at the seam. Moving the actual
+  // DOM nodes instead means page 2 can only ever show precisely the nodes
+  // page 1 didn't keep, with no reflow assumption at all.
+  //
+  // A song can already be split into several sections at the source
+  // (ChordPro's own {new_page} directive — renderSong's own `pages` array,
+  // almost always length 1, but not always: normal print mode joins every
+  // section into one continuous flow on one page regardless — see
+  // buildSongPrintPage's own body.innerHTML — but large print gives each
+  // section its own two-page spread instead of joining them into one
+  // bigger one, which is what the loop below is for. firstPageNumber is a
+  // single starting number (or null for a standalone print with no book
+  // context — SPEC.md §13); each section after the first advances it by 2,
+  // the same as advancing to the next *song* would.
+  function buildLargePrintSongPages(name, rendered, firstPageNumber) {
+    const sections = rendered.pages.length ? rendered.pages : [""];
+    return sections.map((sectionHtml, sectionIndex) => {
+      const sectionRendered = { ...rendered, pages: [sectionHtml] };
+      const pageNumber1 = firstPageNumber === null ? null : firstPageNumber + sectionIndex * 2;
+      const pageNumber2 = pageNumber1 === null ? null : pageNumber1 + 1;
+      const page1 = buildSongPrintPage(name, sectionRendered, pageNumber1);
+      const page2 = buildSongPrintPage(name, { ...sectionRendered, pages: [""] }, pageNumber2, true);
+      return [page1, page2];
+    });
+  }
+
+  // Only meaningful once both pages are attached and visible, same caveat
+  // as fitPrintSongPage above.
+  //
+  // Doesn't reuse fitTextToBox directly, unlike every other fit in this
+  // file — those fit one box to one height/width; this has to fit one
+  // piece of content split across *two* independently-sized boxes (page
+  // 1's own availableHeight1, page 2's own availableHeight2 — usually
+  // close but not identical, since page 2 alone carries a "(continued)"
+  // note), and, more importantly, has to choose *where* to split it.
+  // Cutting at an arbitrary height (the midpoint of a doubled box, an
+  // earlier version of this did) can land mid-line or mid-chorus, visually
+  // chopping a heading or lyric in half across the page break — a real bug
+  // that shipped before this was fixed. trySplit (below) walks
+  // bodyContent's own top-level children (renderSong()'s own
+  // .heading/.line/blockquote/pre/img chunks) instead, and only ever cuts
+  // *between* two of them: a whole blockquote (chorus/bridge — several
+  // lines wrapped in one element) moves to page 2 entirely rather than
+  // being split mid-block, which is the case that most obviously exposed a
+  // bad cut. It only ever *decides where* the cut falls, though — the
+  // actual move happens once, below, after the search settles on a font
+  // size and a matching index into page 1's own (unmodified until then)
+  // children.
+  function fitLargePrintSongPages(page1, page2) {
+    const chordsHeight1 = page1.printChordsForNoteElement ? page1.printChordsForNoteElement.offsetHeight : 0;
+    const chordsHeight2 = page2.printChordsForNoteElement ? page2.printChordsForNoteElement.offsetHeight : 0;
+    const continuedHeight2 = page2.printContinuedNoteElement ? page2.printContinuedNoteElement.offsetHeight : 0;
+    const availableHeight1 = PRINT_CONTENT_HEIGHT_PX - page1.printSongTitleElement.offsetHeight - chordsHeight1;
+    const availableHeight2 = PRINT_CONTENT_HEIGHT_PX - page2.printSongTitleElement.offsetHeight - chordsHeight2 - continuedHeight2;
+    const availableWidth = page1.printSongBody.clientWidth;
+    const content = page1.printSongBodyContent;
+
+    // How many of bodyContent's own children fit on page 1 without
+    // exceeding availableHeight1, and whether everything *after* that
+    // point still fits within availableHeight2, at a given font size.
+    // offsetTop — not a running sum of offsetHeight — is what actually
+    // accounts for the real margins between these children, including any
+    // collapsing between adjacent ones; a manually-summed height would
+    // silently drift from the real rendered layout. Nothing is moved here
+    // — repeated for several candidate font sizes during the search below,
+    // so it has to stay read-only.
+    function trySplit(fontPx) {
+      content.style.fontSize = `${fontPx}px`;
+      const contentTop = content.offsetTop;
+      const children = Array.from(content.children);
+      let cutIndex = children.length;
+      let prefixHeight = 0;
+      for (let i = 0; i < children.length; i += 1) {
+        const bottom = (children[i].offsetTop - contentTop) + children[i].offsetHeight;
+        if (bottom > availableHeight1) { cutIndex = i; break; }
+        prefixHeight = bottom;
+      }
+      const remaining = content.scrollHeight - prefixHeight;
+      const fits = remaining <= availableHeight2 && content.scrollWidth <= availableWidth;
+      return { cutIndex, fits };
+    }
+
+    let low = FIT_MIN_FONT_PX;
+    let high = FIT_MAX_FONT_PX;
+    let best = { fontPx: FIT_MIN_FONT_PX, ...trySplit(FIT_MIN_FONT_PX) };
+    while (low <= high) {
+      const mid = Math.floor((low + high) / 2);
+      const result = trySplit(mid);
+      if (result.fits) {
+        best = { fontPx: mid, ...result };
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+
+    content.style.fontSize = `${best.fontPx}px`;
+    page2.printSongBodyContent.style.fontSize = `${best.fontPx}px`;
+    // Moves the actual overflow nodes onto page 2 — not a clip-and-offset
+    // trick against a *second*, separately-laid-out copy of the same
+    // markup (buildLargePrintSongPages' own comment on why not) — so page
+    // 1 keeps exactly the children just proven to fit its own budget, and
+    // page 2 receives exactly, and only, the ones that didn't; neither
+    // page's own .print-song-body needs an explicit height/overflow clip
+    // at all, since there's nothing left over to clip.
+    Array.from(content.children).slice(best.cutIndex)
+      .forEach((child) => page2.printSongBodyContent.appendChild(child));
+  }
+
+  // A multi-page song sometimes needs one blank filler page in front of it
+  // to align its own first page onto an even page number (alignSongStart,
+  // below) — left unnumbered and explicitly marked, the same convention
+  // real printed books use for a deliberately blank page, so it doesn't
+  // read as a printing mistake.
+  function buildBlankPrintPage() {
+    const page = document.createElement("div");
+    page.className = "print-page print-page-blank";
+    const note = document.createElement("p");
+    note.className = "print-blank-note";
+    note.textContent = "This page is intentionally blank.";
+    page.appendChild(note);
+    return page;
+  }
+
+  // Whether a blank filler page has to go immediately before a song, so a
+  // multi-page song's own spread lands as a true open-book pair — PT:
+  // "keep songs on facing pages [for] double-sided printing"
+  // (#facing-pages-checkbox, checked by default). An even page number and
+  // the odd page immediately after it are what a reader actually sees
+  // together when a bound book is opened (page 1 is always alone, on the
+  // right); an odd-then-even pair never is, since it straddles two
+  // different spreads instead of forming one.
+  //
+  // Checked before *every* song in sequence (showPrintBook/showPrintSetlist's
+  // own running pageNumber), not just once at the front of the book — a
+  // normal-print song's own page count varies now ({new_page} directives,
+  // buildNormalPrintSongPages), so any song along the way, not only the
+  // first, can land on an odd start after an earlier odd-length one.
+  // Single-page songs are skipped entirely: there's no spread to protect,
+  // so aligning them would just scatter blank pages through the book for
+  // no benefit. Large print doesn't have this per-song variability (every
+  // song is always exactly two pages, or two pages per {new_page} section
+  // — buildLargePrintSongPages), so in practice this only ever fires
+  // there for the first song the whole book — every later one is already
+  // aligned automatically, since an even page count added to an even
+  // start always lands on another even number — but the check itself
+  // doesn't need to know that; it just always re-verifies.
+  function alignSongStart(pageNumber, pageCount, keepFacingPages) {
+    if (!keepFacingPages || pageCount <= 1 || pageNumber % 2 === 0) {
+      return { pageNumber, blankPageNeeded: false };
+    }
+    return { pageNumber: pageNumber + 1, blankPageNeeded: true };
   }
 
   function enterPrintView() {
@@ -797,10 +1029,23 @@ export function initSongbookApp(document, window) {
     // (see this function's own header comment above).
     const parsedSong = new ChordProSong(song.text);
     const rendered = renderSong(parsedSong, song.text, { transpose: currentTranspose, capo: currentCapo });
-    const page = buildSongPrintPage(song.name, rendered);
-    printContent.replaceChildren(page);
-    enterPrintView();
-    fitPrintSongPage(page);
+    // No page numbers either way — a standalone single-song print has no
+    // book/contents page for one to refer back to (buildSongPrintPage's own
+    // comment) — and no facing-page alignment concern either: that's a
+    // book-binding concept (alignSongStart's own comment), and
+    // there's no book here, just however many loose sheets this song itself
+    // needs.
+    if (largePrintCheckbox.checked) {
+      const pairs = buildLargePrintSongPages(song.name, rendered, null);
+      printContent.replaceChildren(...pairs.flat());
+      enterPrintView();
+      pairs.forEach(([page1, page2]) => fitLargePrintSongPages(page1, page2));
+    } else {
+      const pages = buildNormalPrintSongPages(song.name, rendered, null);
+      printContent.replaceChildren(...pages);
+      enterPrintView();
+      pages.forEach(fitPrintSongPage);
+    }
   }
 
   // Title + contents share one page (PT: "put the songbook title and TOC
@@ -897,26 +1142,57 @@ export function initSongbookApp(document, window) {
 
   function showPrintBook() {
     currentPrintRebuild = showPrintBook;
-    const firstSongPageNumber = 1 + frontMatterPageCount(songs.length);
+    const large = largePrintCheckbox.checked;
+    const keepFacingPages = facingPagesCheckbox.checked;
 
-    const songPages = songs.map((song, index) => {
+    // Rendered once per song, up front — each song's own page *count* has
+    // to be known before any page *number* can be assigned (alignSongStart
+    // needs it too, to decide whether *this* song needs a blank page in
+    // front of it), since every later song's number depends on how many
+    // pages every earlier one actually took. Normally that's a flat 1 (one
+    // rendered.pages section) or 2 (large print's own two-page spread per
+    // section), but a song with its own {new_page} directive(s) takes one
+    // page per section in normal print (buildNormalPrintSongPages) or one
+    // section-pair per section in large print (buildLargePrintSongPages).
+    let pageNumber = 1 + frontMatterPageCount(songs.length);
+    const songPages = [];
+    const fitJobs = [];
+    const tocEntries = songs.map((song) => {
       const parsedSong = new ChordProSong(song.text);
       // Each song in its own key/capo, not whatever is currently selected
       // on screen (SPEC.md §11) — that selection belongs to viewing one
       // song, not to a whole-book print a reader didn't make that choice
       // for.
       const rendered = renderSong(parsedSong, song.text, {});
-      return buildSongPrintPage(song.name, rendered, firstSongPageNumber + index);
+      const sectionCount = rendered.pages.length || 1;
+      const pageCount = large ? sectionCount * 2 : sectionCount;
+      const aligned = alignSongStart(pageNumber, pageCount, keepFacingPages);
+      if (aligned.blankPageNeeded) songPages.push(buildBlankPrintPage());
+      pageNumber = aligned.pageNumber;
+      const entryPageNumber = pageNumber;
+
+      if (large) {
+        const pairs = buildLargePrintSongPages(song.name, rendered, pageNumber);
+        pairs.forEach(([page1, page2]) => {
+          songPages.push(page1, page2);
+          fitJobs.push(() => fitLargePrintSongPages(page1, page2));
+        });
+      } else {
+        const pages = buildNormalPrintSongPages(song.name, rendered, pageNumber);
+        pages.forEach((page) => {
+          songPages.push(page);
+          fitJobs.push(() => fitPrintSongPage(page));
+        });
+      }
+      pageNumber += pageCount;
+      return { name: song.name, pageNumber: entryPageNumber };
     });
 
-    const frontPages = buildFrontMatterPages(
-      "Songbook",
-      songs.map((song, index) => ({ name: song.name, pageNumber: firstSongPageNumber + index })),
-    );
+    const frontPages = buildFrontMatterPages("Songbook", tocEntries);
 
     printContent.replaceChildren(...frontPages, ...songPages);
     enterPrintView();
-    songPages.forEach(fitPrintSongPage);
+    fitJobs.forEach((job) => job());
   }
 
   // Same shape as showPrintBook, scoped to one setlist's own entries in
@@ -936,25 +1212,45 @@ export function initSongbookApp(document, window) {
     const setlist = setlists[index];
     if (!setlist) return;
     currentPrintRebuild = () => showPrintSetlist(index);
-    const firstSongPageNumber = 1 + frontMatterPageCount(setlist.entries.length);
+    const large = largePrintCheckbox.checked;
+    const keepFacingPages = facingPagesCheckbox.checked;
+    let pageNumber = 1 + frontMatterPageCount(setlist.entries.length);
 
     const songPages = [];
-    let printableCount = 0;
+    const fitJobs = [];
     const tocEntries = setlist.entries.map((entry) => {
       if (entry.songIndex < 0) return { name: entry.name, pageNumber: null };
       const song = songs[entry.songIndex];
       const parsedSong = new ChordProSong(song.text);
       const rendered = renderSong(parsedSong, song.text, { transpose: entry.transpose, capo: entry.capo });
-      const pageNumber = firstSongPageNumber + printableCount;
-      songPages.push(buildSongPrintPage(entry.name, rendered, pageNumber));
-      printableCount += 1;
-      return { name: entry.name, pageNumber };
+      const sectionCount = rendered.pages.length || 1;
+      const pageCount = large ? sectionCount * 2 : sectionCount;
+      const aligned = alignSongStart(pageNumber, pageCount, keepFacingPages);
+      if (aligned.blankPageNeeded) songPages.push(buildBlankPrintPage());
+      pageNumber = aligned.pageNumber;
+      const entryPageNumber = pageNumber;
+
+      if (large) {
+        const pairs = buildLargePrintSongPages(entry.name, rendered, pageNumber);
+        pairs.forEach(([page1, page2]) => {
+          songPages.push(page1, page2);
+          fitJobs.push(() => fitLargePrintSongPages(page1, page2));
+        });
+      } else {
+        const pages = buildNormalPrintSongPages(entry.name, rendered, pageNumber);
+        pages.forEach((page) => {
+          songPages.push(page);
+          fitJobs.push(() => fitPrintSongPage(page));
+        });
+      }
+      pageNumber += pageCount;
+      return { name: entry.name, pageNumber: entryPageNumber };
     });
     const frontPages = buildFrontMatterPages(setlist.name, tocEntries);
 
     printContent.replaceChildren(...frontPages, ...songPages);
     enterPrintView();
-    songPages.forEach(fitPrintSongPage);
+    fitJobs.forEach((job) => job());
   }
 
   // Setlists (SPEC.md §6) — display and print only in this pass, per PT's
@@ -1334,6 +1630,20 @@ export function initSongbookApp(document, window) {
   // than requiring a trip back out of print mode to see the effect.
   printInstrumentSelect.addEventListener("change", () => {
     setCurrentInstrument(printInstrumentSelect.value);
+    if (currentPrintRebuild) currentPrintRebuild();
+  });
+  // No separate state to sync here — largePrintCheckbox.checked is read
+  // directly wherever large print matters (showPrintSong/showPrintBook/
+  // showPrintSetlist), and a checkbox's own checked state is unaffected by
+  // hiding/showing it (setHidden's classList toggle, entering/leaving print
+  // view), so there's nothing to restore on re-entry either.
+  largePrintCheckbox.addEventListener("change", () => {
+    if (currentPrintRebuild) currentPrintRebuild();
+  });
+  // Checked by default in the markup itself (<input ... checked>), not set
+  // here — PT: default on for double-sided printing. Same no-separate-
+  // state reasoning as largePrintCheckbox just above.
+  facingPagesCheckbox.addEventListener("change", () => {
     if (currentPrintRebuild) currentPrintRebuild();
   });
 
@@ -1796,6 +2106,15 @@ body {
   font-size: 0.95rem;
   cursor: pointer;
 }
+#large-print-label, #facing-pages-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0.75rem 0.5rem 0 0;
+  font-family: inherit;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
 /* Real A4, not chordprosite's own 210mm/297mm scaled by 1.5 (315mm x
    445.5mm — not a real paper size, and not one this rewrite reproduces).
    Deliberately NOT confined to @media print — see this section's own
@@ -1832,6 +2151,29 @@ body {
   font-size: 0.75rem;
   font-style: italic;
   margin: 0 0 0.5rem;
+}
+/* Large print's own second page (buildSongPrintPage's continued param,
+   fitLargePrintSongPages) — same treatment as .print-chords-for-note
+   (small, muted, centred, directly under the title) since the two never
+   appear together on one page (a large-print page's chords-for-note, if
+   any, sits below this instead — see buildSongPrintPage's own append
+   order), so there's no risk of them visually competing. */
+.print-continued-note {
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-style: italic;
+  margin: 0 0 0.5rem;
+}
+/* The filler pages a multi-page song sometimes needs (alignSongStart's own
+   comment) — same real A4 box as every other .print-page, just with
+   nothing else on it besides this one explanatory line, centred a little
+   below where a title would normally sit. */
+.print-blank-note {
+  text-align: center;
+  color: var(--muted);
+  font-style: italic;
+  margin: 40mm 0 0;
 }
 .print-toc-entry {
   display: flex;
@@ -1989,6 +2331,8 @@ a.setlist-entry-name:hover { text-decoration: underline; }
 one — a new window doesn't work in some contexts (SharePoint, Dropbox) this page may be
 opened from.</p>
 <select id="print-instrument-select" aria-label="Instrument"></select>
+<label id="large-print-label"><input type="checkbox" id="large-print-checkbox"> Large print</label>
+<label id="facing-pages-label"><input type="checkbox" id="facing-pages-checkbox" checked> Keep songs on facing pages</label>
 <button id="print-now-button" type="button">Print now</button>
 <button id="done-printing-button" type="button">Done printing</button>
 </div>
