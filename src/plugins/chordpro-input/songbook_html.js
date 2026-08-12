@@ -125,9 +125,29 @@ export function initSongbookApp(document, window) {
 
   const listView = document.getElementById("list-view");
   const songView = document.getElementById("song-view");
-  const menuBar = document.getElementById("menu-bar");
+  // #app-bar is always mounted, sticky, and a single line — no second row
+  // — so #fullscreen-button can live inside it directly rather than as a
+  // separate fixed element that has to be kept from overlapping it by
+  // hand. Every other control in it is individually setHidden() by the
+  // view-switching functions below (there's no longer one wrapper element
+  // whose own hidden state implies all of theirs).
+  const appBar = document.getElementById("app-bar");
+  const menuBarOverflowToggle = document.getElementById("menu-bar-overflow-toggle");
+  const menuBarOverflow = document.getElementById("menu-bar-overflow");
   const songViewTitle = document.getElementById("song-view-title");
+  // #song-content is the box fitSongContent() scales font-size against —
+  // #song-header (title/key/capo, moved here from #app-bar so they scale
+  // and column-flow with the song itself, rather than taking up fixed
+  // space in the sticky bar above) is its first child and stays put across
+  // renders; only #song-pages, the second child, gets overwritten on every
+  // renderCurrentSong() call. Both participate in #song-content's own
+  // multi-column flow when .two-columns is set — CSS multi-col treats all
+  // of a container's children as one continuous flow, which is what puts
+  // #song-header at the top of the *left* column specifically, with no
+  // extra CSS needed for that placement.
   const songContent = document.getElementById("song-content");
+  const songHeader = document.getElementById("song-header");
+  const songPagesElement = document.getElementById("song-pages");
   const songListElement = document.getElementById("song-list");
   const prevButton = document.getElementById("prev-song-button");
   const nextButton = document.getElementById("next-song-button");
@@ -136,6 +156,8 @@ export function initSongbookApp(document, window) {
   const capoSelect = document.getElementById("capo-select");
   const instrumentSelect = document.getElementById("instrument-select");
   const chordDiagramsPanel = document.getElementById("chord-diagrams");
+  const toggleChordsButton = document.getElementById("toggle-chords-button");
+  const toggleChordsGlyph = document.getElementById("toggle-chords-glyph");
   const printSongButton = document.getElementById("print-song-button");
   const printBookButton = document.getElementById("print-book-button");
   const printView = document.getElementById("print-view");
@@ -185,6 +207,14 @@ export function initSongbookApp(document, window) {
   // whole setlist rather than a control on every row, matching PT's own
   // ask ("make them hidable") for a capability, not a per-entry UI.
   let notesVisible = true;
+  // Whether inline chord names (renderSong()'s own .inlineChord spans)
+  // render at all — global for the session like currentInstrument, not
+  // reset per song. Scoped deliberately to the inline chord names in the
+  // lyrics themselves, not the #chord-diagrams panel: that's a separately
+  // opted-into feature (via instrument selection), not something this
+  // toggle needs to also suppress. Print is unaffected — a printed chart
+  // always shows its chords regardless of this on-screen preference.
+  let chordsHidden = false;
   // Whichever showPrintSong/showPrintBook/showPrintSetlist call is
   // currently on screen, re-invocable with no arguments — set at the start
   // of each of those functions. Changing the instrument from
@@ -240,7 +270,7 @@ export function initSongbookApp(document, window) {
   // Toggling a "hidden" class, not element.style.display directly: setting
   // style.display = "" *clears* an inline override rather than making the
   // element visible again — it then falls back to whatever the stylesheet
-  // itself says, which for #song-view/#menu-bar/etc. is still `display:
+  // itself says, which for #song-view/#back-to-list-button/etc. is still `display:
   // none` (see the <style> block in renderSongbookHtml). That was a real
   // bug here, not a hypothetical one — both views ended up hidden after
   // clicking a song, which is exactly "blank". classList avoids it: an
@@ -435,12 +465,26 @@ export function initSongbookApp(document, window) {
     const parsedSong = new ChordProSong(song.text);
     const rendered = renderSong(parsedSong, song.text, { transpose: currentTranspose, capo: currentCapo });
 
-    songContent.innerHTML = rendered.pages.join("\n");
+    songPagesElement.innerHTML = rendered.pages.join("\n");
+    songContent.classList.toggle("chords-hidden", chordsHidden);
     populateKeySelect(parsedSong);
     populateCapoSelect(parsedSong);
     setHidden(instrumentSelect, !parsedSong.hasChords);
+    setHidden(toggleChordsButton, !parsedSong.hasChords);
     renderChordDiagrams(parsedSong.hasChords ? rendered.chordsUsed : []);
     fitSongContent();
+  }
+
+  // A compact "[C]" glyph, not a text label — this button now sits among
+  // the other icon buttons (fullscreen/prev/next/print), so it gets the
+  // same treatment #fullscreen-button's own label already does: only
+  // title/aria-label change with state, not the glyph itself, striking
+  // through the C instead to show "chords are hidden" at a glance.
+  function updateToggleChordsButtonLabel() {
+    const label = chordsHidden ? "Show chords" : "Hide chords";
+    toggleChordsButton.title = label;
+    toggleChordsButton.setAttribute("aria-label", label);
+    toggleChordsGlyph.classList.toggle("struck", chordsHidden);
   }
 
   // Scaling song text to fill the available screen — ported from
@@ -474,10 +518,18 @@ export function initSongbookApp(document, window) {
   // earlier version of this print feature let a long song spill onto a
   // second physical page instead, on the mistaken belief that chordprosite
   // clips; it doesn't, so this doesn't either.
-  function fitTextToBox(element, availableHeight, availableWidth) {
-    let low = FIT_MIN_FONT_PX;
-    let high = FIT_MAX_FONT_PX;
-    let bestFit = FIT_MIN_FONT_PX;
+  // maxFontPx/minFontPx default to FIT_MAX_FONT_PX/FIT_MIN_FONT_PX for the
+  // two like-for-like ports below (fitSongContent/fitPrintSongPage) —
+  // fitSongHeaderTitle (below) passes its own, much lower ceiling (a title
+  // has no business growing past what its own em-based CSS size would
+  // already give it just because there happens to be room) and a higher
+  // floor (unlike body text, a title that can't fit should stop shrinking
+  // once it's unreadable and ellipsis instead — see #song-view-title's own
+  // CSS — rather than keep shrinking all the way to FIT_MIN_FONT_PX).
+  function fitTextToBox(element, availableHeight, availableWidth, maxFontPx = FIT_MAX_FONT_PX, minFontPx = FIT_MIN_FONT_PX) {
+    let low = minFontPx;
+    let high = maxFontPx;
+    let bestFit = minFontPx;
     while (low <= high) {
       const mid = Math.floor((low + high) / 2);
       element.style.fontSize = `${mid}px`;
@@ -492,10 +544,66 @@ export function initSongbookApp(document, window) {
     element.style.fontSize = `${bestFit}px`;
   }
 
+  // Keeps #song-view-title on the same line as #key-select/#capo-select
+  // (SPEC.md §12) even when the title is long or the screen is narrow — the
+  // same binary-search idea as fitTextToBox, but sized against the *header's*
+  // own leftover width rather than the whole page, and clamped to a
+  // TITLE_MIN_FONT_PX..TITLE_MAX_FONT_PX range regardless of how big or
+  // small the body's own font-size gets. Run after fitSongContent (which
+  // it's called from) has already settled #song-content's own font-size
+  // and, in turn, key/capo's em-based widths — this only ever shrinks the
+  // title to make room for whatever those two already are, never the other
+  // way around.
+  //
+  // TITLE_MIN_FONT_PX is a readable floor, well above FIT_MIN_FONT_PX: a
+  // very short song can drive the body font-size (and, with it, key/capo's
+  // em-based size — #key-select/#capo-select's own CSS caps that growth at
+  // 1.25rem for exactly this reason, but doesn't eliminate it) up quite far,
+  // which used to leave the title almost no room and shrink it to
+  // near-nothing to compensate. Below this floor it ellipsis-truncates
+  // instead (#song-view-title's own white-space/overflow/text-overflow) —
+  // a readable-but-truncated title beats a technically-whole but
+  // microscopic one.
+  //
+  // TITLE_MAX_FONT_PX is the same idea in the other direction: a *very*
+  // short song can drive the body font-size all the way to FIT_MAX_FONT_PX
+  // (80px), and 1.3x that would make the title dominate the page — a lot of
+  // width in single-column layouts, and a lot of height eaten out of what
+  // fitSongContent measured as available for the lyrics themselves (its
+  // own scrollHeight includes #song-header's, per this function's own
+  // header comment). The title should read as a heading, not compete with
+  // the song for space.
+  const TITLE_MIN_FONT_PX = 16;
+  const TITLE_MAX_FONT_PX = 36;
+  // Keep in sync by hand with #song-header's own CSS: the 1.3 multiplier
+  // matches #song-view-title's `font-size: 1.3em`, and SONG_HEADER_GAP_EM
+  // matches #song-header's `gap: 0.6em` — both em-relative to #song-content,
+  // read here from songContent.style.fontSize (set moments ago by
+  // fitTextToBox, in the caller) rather than getComputedStyle(), which the
+  // test suite's fake DOM has no equivalent of and which a real browser
+  // would need a layout pass to resolve anyway.
+  const SONG_HEADER_GAP_EM = 0.6;
+  function fitSongHeaderTitle() {
+    if (isHidden(songViewTitle)) return;
+    const bodyFontPx = parseFloat(songContent.style.fontSize) || FIT_MAX_FONT_PX;
+    const maxTitleFontPx = Math.min(TITLE_MAX_FONT_PX, Math.max(TITLE_MIN_FONT_PX, bodyFontPx * 1.3));
+    const gapPx = bodyFontPx * SONG_HEADER_GAP_EM;
+    let reservedWidth = 0;
+    let visibleSiblings = 0;
+    if (!isHidden(keySelect)) { reservedWidth += keySelect.offsetWidth; visibleSiblings += 1; }
+    if (!isHidden(capoSelect)) { reservedWidth += capoSelect.offsetWidth; visibleSiblings += 1; }
+    reservedWidth += gapPx * visibleSiblings; // one gap per sibling, between it and whatever precedes it
+    const availableWidth = Math.max(0, songHeader.clientWidth - reservedWidth);
+    // Height never binds here — #song-view-title is white-space: nowrap
+    // (its own CSS), so at any font size in range it's exactly one line
+    // tall; this bound only has to be generously larger than that.
+    fitTextToBox(songViewTitle, FIT_MAX_FONT_PX * 4, availableWidth, maxTitleFontPx, TITLE_MIN_FONT_PX);
+  }
+
   function fitSongContent() {
     if (currentIndex < 0) return;
 
-    const availableHeight = window.innerHeight - menuBar.offsetHeight;
+    const availableHeight = window.innerHeight - appBar.offsetHeight;
     const availableWidth = songContent.clientWidth;
 
     // Landscape-proportioned space — more available width than height —
@@ -506,6 +614,7 @@ export function initSongbookApp(document, window) {
     // around afterwards.
     songContent.classList.toggle("two-columns", availableHeight < availableWidth);
     fitTextToBox(songContent, availableHeight, availableWidth);
+    fitSongHeaderTitle();
   }
 
   // chordprosite registers this same idea (`window.addEventListener('resize',
@@ -651,7 +760,15 @@ export function initSongbookApp(document, window) {
   function enterPrintView() {
     setHidden(listView, true);
     setHidden(songView, true);
-    setHidden(menuBar, true);
+    setHidden(prevButton, true);
+    setHidden(nextButton, true);
+    setHidden(printSongButton, true);
+    setHidden(songViewTitle, true);
+    setHidden(backButton, true);
+    setHidden(keySelect, true);
+    setHidden(capoSelect, true);
+    setHidden(menuBarOverflow, true);
+    setHidden(menuBarOverflowToggle, true);
     setHidden(setlistView, true);
     setHidden(setlistIndexView, true);
     setHidden(printView, false);
@@ -949,7 +1066,15 @@ export function initSongbookApp(document, window) {
 
     setHidden(listView, true);
     setHidden(songView, true);
-    setHidden(menuBar, true);
+    setHidden(prevButton, true);
+    setHidden(nextButton, true);
+    setHidden(printSongButton, true);
+    setHidden(songViewTitle, true);
+    setHidden(backButton, true);
+    setHidden(keySelect, true);
+    setHidden(capoSelect, true);
+    setHidden(menuBarOverflow, true);
+    setHidden(menuBarOverflowToggle, true);
     setHidden(printView, true);
     setHidden(setlistIndexView, true);
     setHidden(setlistView, false);
@@ -965,7 +1090,15 @@ export function initSongbookApp(document, window) {
     currentSetlistIndex = -1;
     setHidden(listView, true);
     setHidden(songView, true);
-    setHidden(menuBar, true);
+    setHidden(prevButton, true);
+    setHidden(nextButton, true);
+    setHidden(printSongButton, true);
+    setHidden(songViewTitle, true);
+    setHidden(backButton, true);
+    setHidden(keySelect, true);
+    setHidden(capoSelect, true);
+    setHidden(menuBarOverflow, true);
+    setHidden(menuBarOverflowToggle, true);
     setHidden(printView, true);
     setHidden(setlistView, true);
     setHidden(setlistIndexView, false);
@@ -977,9 +1110,15 @@ export function initSongbookApp(document, window) {
     currentSetlistIndex = -1;
     setHidden(listView, false);
     setHidden(songView, true);
-    setHidden(menuBar, true);
     setHidden(prevButton, true);
     setHidden(nextButton, true);
+    setHidden(printSongButton, true);
+    setHidden(songViewTitle, true);
+    setHidden(backButton, true);
+    setHidden(keySelect, true);
+    setHidden(capoSelect, true);
+    setHidden(menuBarOverflow, true);
+    setHidden(menuBarOverflowToggle, true);
     setHidden(chordDiagramsPanel, true);
     setHidden(printView, true);
     setHidden(setlistView, true);
@@ -1037,17 +1176,22 @@ export function initSongbookApp(document, window) {
     }
 
     // Visibility toggled before content/fit, not after: fitSongContent()
-    // reads menuBar.offsetHeight and songContent.clientWidth, both of which
+    // reads appBar.offsetHeight and songContent.clientWidth, both of which
     // are 0 for a display:none element — measuring before these are shown
     // would size the fit against the wrong (empty) box.
     setHidden(listView, true);
     setHidden(songView, false);
-    setHidden(menuBar, false);
     setHidden(prevButton, false);
     setHidden(nextButton, false);
+    setHidden(printSongButton, false);
+    setHidden(songViewTitle, false);
+    setHidden(backButton, false);
+    setHidden(menuBarOverflow, false);
+    setHidden(menuBarOverflowToggle, false);
     setHidden(printView, true);
     setHidden(setlistView, true);
     setHidden(setlistIndexView, true);
+    menuBarOverflow.classList.remove("open");
 
     songViewTitle.textContent = song.name;
     prevButton.disabled = position <= 0;
@@ -1158,6 +1302,31 @@ export function initSongbookApp(document, window) {
     setCurrentInstrument(instrumentSelect.value);
     renderCurrentSong();
   });
+  toggleChordsButton.addEventListener("click", () => {
+    chordsHidden = !chordsHidden;
+    updateToggleChordsButtonLabel();
+    songContent.classList.toggle("chords-hidden", chordsHidden);
+  });
+  // #menu-bar-overflow-toggle/#menu-bar-overflow only do anything visible
+  // below the small-screen breakpoint (their own CSS) — harmless to wire
+  // unconditionally above it, since the toggle itself stays hidden there.
+  //
+  // #menu-bar-overflow is position: fixed, not absolute, when open (its
+  // own CSS) — #app-bar has overflow-x: auto (so the icon row itself can
+  // scroll rather than wrap on a truly tiny screen), and per the CSS
+  // overflow spec, setting overflow-x to anything but visible silently
+  // forces overflow-y to 'auto' too, which would clip an absolutely
+  // positioned descendant the instant it extends past #app-bar's own
+  // bottom edge — exactly what a dropdown does. position: fixed escapes
+  // that (its containing block is the viewport, not #app-bar), at the cost
+  // of needing its own top set here rather than a CSS top: 100%, which
+  // only means something relative to a box, not the viewport.
+  menuBarOverflowToggle.addEventListener("click", () => {
+    if (!menuBarOverflow.classList.contains("open")) {
+      menuBarOverflow.style.top = `${appBar.getBoundingClientRect().bottom + 6}px`;
+    }
+    menuBarOverflow.classList.toggle("open");
+  });
   // The print-banner's own copy of the same control — PT: let the
   // instrument be picked/changed from print preview itself, not only from
   // a song viewed beforehand. Redraws whatever's currently on screen
@@ -1194,8 +1363,14 @@ export function initSongbookApp(document, window) {
   // tracking its own state, since fullscreenchange also fires when the
   // browser itself exits fullscreen (Escape key, unrelated to this app's
   // own Escape handler above, which only ever checks print view).
+  // Only the accessible label changes with state, not the glyph itself —
+  // this button is a fixed-size icon square (matches prev/next/print/
+  // fullscreen's shared row style), and "Exit full screen" as literal
+  // textContent wraps and overflows a box that small.
   function updateFullscreenButtonLabel() {
-    fullscreenButton.textContent = document.fullscreenElement ? "Exit full screen" : "Full screen";
+    const label = document.fullscreenElement ? "Exit full screen" : "Full screen";
+    fullscreenButton.title = label;
+    fullscreenButton.setAttribute("aria-label", label);
   }
   fullscreenButton.addEventListener("click", () => {
     const request = document.fullscreenElement
@@ -1209,6 +1384,7 @@ export function initSongbookApp(document, window) {
   });
   document.addEventListener("fullscreenchange", updateFullscreenButtonLabel);
   updateFullscreenButtonLabel();
+  updateToggleChordsButtonLabel();
 
   showList();
 }
@@ -1266,59 +1442,60 @@ body {
 }
 .hidden { display: none !important; }
 
-#menu-bar {
+/* One single-line bar, always — never a second row. #prev-song-button is
+   first, so it's leftmost by DOM order; #next-song-button gets its own
+   margin-left: auto (below) to push itself all the way to the right edge,
+   since the title that used to do that job by taking flex: 1 has moved
+   into #song-content itself (see #song-header below) — freeing up this
+   bar's height for song content, at the cost of needing an explicit way to
+   hold prev/next apart now that nothing else in the bar is elastic. If the
+   bar's total content can't fit a given viewport, it scrolls horizontally
+   (overflow-x) rather than wrapping to a second line — wrapping is exactly
+   the two-line layout this replaced. */
+#app-bar {
   position: sticky;
   top: 0;
   z-index: 10;
   display: flex;
   align-items: center;
-  gap: 1rem;
-  padding: 0.6rem 1rem;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  gap: 0.4rem;
+  padding: 0.5rem 0.75rem;
   background: var(--surface);
   border-bottom: 2px solid var(--border);
   font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
 }
-#menu-bar-center {
-  flex: 1;
-  min-width: 0;
-  display: flex;
+/* Icon buttons (fullscreen/prev/next/print/overflow-toggle) share one
+   compact square footprint so the cluster reads as a single unit rather
+   than a row of differently-sized controls — the glyphs are the label, so
+   there's no text width to size around. */
+#fullscreen-button, #prev-song-button, #next-song-button,
+#print-song-button, #menu-bar-overflow-toggle, #toggle-chords-button {
+  flex-shrink: 0;
+  width: 2.25rem;
+  height: 2.25rem;
+  padding: 0;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 0.9rem;
-}
-#song-view-title {
-  font-weight: 700;
-  font-size: 1.05rem;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  /* The one thing in #menu-bar-center allowed to shrink/truncate — the key
-     and capo selects below are fixed-width controls, not readable text, so
-     they keep flex-shrink: 0 and let the title give way first on a narrow
-     screen. */
-  flex-shrink: 1;
-}
-#menu-bar button {
   font-family: inherit;
-  font-size: 0.95rem;
-  cursor: pointer;
-}
-#key-select, #capo-select, #instrument-select {
-  flex-shrink: 0;
-  font-family: inherit;
-  font-size: 0.85rem;
-  padding: 0.3rem 0.4rem;
+  font-size: 1.15rem;
+  line-height: 1;
   border: 1px solid var(--ink);
   background: var(--bg);
   color: var(--ink);
+  cursor: pointer;
 }
 #prev-song-button, #next-song-button {
-  flex: 0 0 auto;
-  padding: 0.5rem 1.1rem;
-  border: 2px solid var(--accent);
+  border-color: var(--accent);
   background: var(--accent);
   color: var(--accent-contrast);
   font-weight: 700;
+  font-size: 1.4rem;
+}
+#next-song-button {
+  margin-left: auto;
 }
 #prev-song-button:disabled, #next-song-button:disabled {
   background: var(--bg);
@@ -1327,11 +1504,88 @@ body {
   cursor: not-allowed;
 }
 #back-to-list-button {
+  flex-shrink: 0;
   padding: 0.5rem 0.9rem;
   border: 2px solid var(--ink);
   background: var(--bg);
   color: var(--ink);
   font-weight: 700;
+  font-family: inherit;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+#instrument-select {
+  flex-shrink: 0;
+  font-family: inherit;
+  font-size: 0.85rem;
+  padding: 0.3rem 0.4rem;
+  border: 1px solid var(--ink);
+  background: var(--bg);
+  color: var(--ink);
+}
+/* "[C]" rather than a text label — chosen so this reads as an icon among
+   the other icon buttons it now sits alongside (print moved in here too,
+   below), not a stray text button. Only the C itself strikes through for
+   the "hidden" state (updateToggleChordsButtonLabel, songbook_html.js);
+   title/aria-label carry the actual "Hide chords"/"Show chords" text, the
+   same split #fullscreen-button's own label already uses. */
+#toggle-chords-glyph.struck {
+  text-decoration: line-through;
+}
+/* display: contents — #menu-bar-overflow itself contributes no box, so
+   #instrument-select/#toggle-chords-button/#print-song-button lay out as
+   if they were direct #app-bar children, right in the single line. Print
+   moved in here (from its own place in the row) specifically so tight
+   layouts fold it under the hamburger menu along with the other two,
+   rather than it staying a fourth icon competing for room in the row
+   itself. Below the breakpoint this switches to a real box that detaches
+   from the line entirely and opens as a dropdown under the hamburger
+   toggle instead — never a second row of the bar itself. */
+#menu-bar-overflow {
+  display: contents;
+}
+/* Hidden by default — shown by the media query below, not by the .hidden
+   convention: JS's setHidden() already uses .hidden to scope this button
+   to song view (see showSong()/showList()/etc.), so this rule has to
+   compose with that rather than replace it, which is why it's a plain
+   display toggle rather than a class the JS could stomp on. */
+#menu-bar-overflow-toggle {
+  display: none;
+}
+@media (max-width: 640px) {
+  #menu-bar-overflow-toggle {
+    display: inline-flex;
+  }
+  /* position: fixed, not absolute, and top set from JS (menuBarOverflowToggle's
+     own click handler, songbook_html.js) rather than a CSS top: 100% —
+     #app-bar has overflow-x: auto (so the icon row can scroll rather than
+     wrap on a truly tiny screen), and per the CSS overflow spec, setting
+     overflow-x to anything but visible silently forces overflow-y to
+     'auto' too. That would clip this the instant it extends past
+     #app-bar's own bottom edge if it stayed position: absolute (whose
+     containing block, #app-bar's own sticky positioning context, is also
+     the clipping ancestor) — fixed's containing block is the viewport
+     instead, which #app-bar's overflow has no say over. */
+  #menu-bar-overflow {
+    display: none;
+    position: fixed;
+    top: 0;
+    right: 0.75rem;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.5rem;
+    min-width: 10rem;
+    padding: 0.6rem;
+    background: var(--surface);
+    border: 2px solid var(--border);
+    z-index: 15;
+  }
+  #menu-bar-overflow.open {
+    display: flex;
+  }
+  #instrument-select {
+    width: 100%;
+  }
 }
 
 #list-view, #setlist-index-view {
@@ -1440,6 +1694,10 @@ body {
   font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
   font-size: 0.95em;
 }
+/* #toggle-chords-button's on-screen-only preference (chordsHidden, see
+   initSongbookApp) — scoped to #song-content, never #print-content, since
+   a printed chart always shows its chords regardless of this toggle. */
+#song-content.chords-hidden .inlineChord { display: none; }
 #song-content blockquote.chorus, #song-content blockquote.bridge,
 #print-content blockquote.chorus, #print-content blockquote.bridge {
   margin: 0.75em 0;
@@ -1462,40 +1720,61 @@ body {
   column-gap: 2rem;
 }
 
-#print-song-button {
+/* Title/key/capo, moved here from #app-bar so they scale with the song
+   (fitSongContent sets #song-content's own font-size; nothing here
+   overrides it, so em-based sizing below inherits that value directly) and
+   column-flow with it. No column-span here deliberately — CSS multi-col
+   lays a container's children out as one continuous flow, so as the very
+   first content in #song-content, #song-header lands at the top of column
+   1 on its own, without needing to span both. break-inside: avoid-column
+   keeps title and key/capo together as one unit rather than letting the
+   column break fall between them; flex-wrap: nowrap keeps them on one
+   *row*, full stop — fitSongHeaderTitle (songbook_html.js) is what actually
+   guarantees that fits, by shrinking #song-view-title's own font-size
+   (set inline, overriding the em value below) rather than letting it wrap
+   or push key/capo onto a second line.
+
+   Keep in sync by hand: this rule's own gap value (0.6em) and
+   fitSongHeaderTitle's SONG_HEADER_GAP_EM constant. That function has no
+   way to read this value back out of the stylesheet (no getComputedStyle()
+   — see its own comment), so it keeps its own copy instead; changing one
+   without the other means fitSongHeaderTitle reserves the wrong amount of
+   width for the gaps between title/key/capo. */
+#song-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 0.6em;
+  margin-bottom: 0.5em;
+  break-inside: avoid-column;
+}
+#song-view-title {
+  flex: 1 1 auto;
+  min-width: 2em;
+  font-weight: 700;
+  font-size: 1.3em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#key-select, #capo-select {
   flex-shrink: 0;
-  padding: 0.5rem 0.9rem;
-  border: 1px solid var(--ink);
-  background: var(--bg);
-  color: var(--ink);
   font-family: inherit;
-  font-size: 0.95rem;
-  cursor: pointer;
-}
-/* Fixed at the top-left corner rather than inside any one view, unlike
-   every other button on this page — usable from the list, a song, or
-   (harmlessly, if pointless) print mode alike, matching the actual use
-   case: clearing browser chrome for more screen before playing, not
-   something tied to what's currently open. Sits *below* #menu-bar's own
-   top-left button (#prev-song-button), not on top of it — the sticky bar
-   pins to the very top of the viewport when a song is open, and
-   #prev-song-button is that bar's own leftmost thing, so "top left" for
-   this button specifically means just under the bar's height, not literal
-   (0, 0). z-index above #menu-bar's own (10) regardless, since the two no
-   longer overlap but the bar still shouldn't ever paint over this. */
-#fullscreen-button {
-  position: fixed;
-  top: 3.5rem;
-  left: 0.5rem;
-  z-index: 20;
-  padding: 0.4rem 0.8rem;
+  /* Scales with the song like the title (SPEC.md §12), but capped in
+     absolute terms — without this, a very short song can drive the body
+     font-size (and this 0.7em along with it) up far enough that these two
+     controls alone eat most of #song-header's width, leaving
+     fitSongHeaderTitle almost nothing to work with. */
+  font-size: min(0.7em, 1.25rem);
+  padding: 0.2em 0.35em;
   border: 1px solid var(--ink);
   background: var(--bg);
   color: var(--ink);
-  font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
-  font-size: 0.8rem;
-  cursor: pointer;
 }
+
+/* #print-song-button and #fullscreen-button both live in #app-bar now and
+   get their sizing/border/etc. from the shared icon-button rule above — no
+   rule of their own needed. */
 
 /* #print-view is a third top-level view alongside #list-view/#song-view
    (see enterPrintView()/exitPrintView() in initSongbookApp). */
@@ -1591,9 +1870,9 @@ body {
   /* Only #print-content is meant to end up on paper — the on-screen
      instructions/buttons above it, and anything from the other two views
      that isn't already display:none, have no reason to print. #fullscreen-
-     button is fixed-position across every view specifically so it's always
-     reachable (its own CSS comment) — "always", it turns out, still isn't
-     supposed to include an actual printed page. */
+     button lives in #app-bar, which stays mounted (and un-hidden) across
+     every view specifically so it's always reachable — "always", it turns
+     out, still isn't supposed to include an actual printed page. */
   #print-banner, #fullscreen-button { display: none; }
   #print-view { padding: 0; overflow: visible; }
   /* The border/gap between pages is an on-screen page-separator cue only —
@@ -1659,20 +1938,18 @@ a.setlist-entry-name:hover { text-decoration: underline; }
 </head>
 <body>
 
-<button id="fullscreen-button" type="button">Full screen</button>
-
-<nav id="menu-bar" class="hidden">
-<button id="prev-song-button" type="button">&larr; Prev</button>
-<div id="menu-bar-center">
-<button id="back-to-list-button" type="button">Back to list</button>
-<span id="song-view-title"></span>
-<select id="key-select" class="hidden" aria-label="Key"></select>
-<select id="capo-select" class="hidden" aria-label="Capo"></select>
+<header id="app-bar">
+<button id="prev-song-button" type="button" class="hidden" title="Previous song" aria-label="Previous song">&lsaquo;</button>
+<button id="fullscreen-button" type="button" title="Full screen" aria-label="Full screen">&#9974;</button>
+<button id="back-to-list-button" type="button" class="hidden">Back to list</button>
+<div id="menu-bar-overflow" class="hidden">
 <select id="instrument-select" class="hidden" aria-label="Instrument"></select>
-<button id="print-song-button" type="button">Print this song</button>
+<button id="toggle-chords-button" type="button" class="hidden" title="Hide chords" aria-label="Hide chords">[<span id="toggle-chords-glyph">C</span>]</button>
+<button id="print-song-button" type="button" class="hidden" title="Print this song" aria-label="Print this song">&#128424;&#65039;</button>
 </div>
-<button id="next-song-button" type="button">Next &rarr;</button>
-</nav>
+<button id="menu-bar-overflow-toggle" type="button" class="hidden" aria-label="More song options">&#9776;</button>
+<button id="next-song-button" type="button" class="hidden" title="Next song" aria-label="Next song">&rsaquo;</button>
+</header>
 
 <section id="list-view">
 <h1>Songs</h1>
@@ -1691,7 +1968,7 @@ a.setlist-entry-name:hover { text-decoration: underline; }
 </section>
 
 <section id="song-view" class="hidden">
-<div id="song-content"></div>
+<div id="song-content"><div id="song-header"><span id="song-view-title" class="hidden"></span><select id="key-select" class="hidden" aria-label="Key"></select><select id="capo-select" class="hidden" aria-label="Capo"></select></div><div id="song-pages"></div></div>
 <div id="chord-diagrams" class="hidden"></div>
 </section>
 

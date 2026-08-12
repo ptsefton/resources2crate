@@ -152,17 +152,26 @@ const SETLIST_CRATE_JSON = {
 function makeElement() {
   const listeners = {};
   const classes = new Set();
+  const attributes = {};
   return {
     textContent: "",
     innerHTML: "",
     disabled: false,
+    title: "",
     children: [],
     style: {},
+    setAttribute(name, value) { attributes[name] = String(value); },
+    getAttribute(name) { return name in attributes ? attributes[name] : null; },
+    // menuBarOverflowToggle's click handler reads .bottom off #app-bar's own
+    // rect to position the dropdown — 0 by default, matching an unrendered
+    // element; tests exercising that specifically override it.
+    getBoundingClientRect() { return { top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0 }; },
     // Layout measurements fitSongContent reads: 0 by default, matching a
     // real, unrendered element — tests exercising that function override
     // these (as plain properties, or as getters via Object.defineProperty
     // when a value needs to react to style.fontSize being set).
     offsetHeight: 0,
+    offsetWidth: 0,
     clientWidth: 0,
     scrollHeight: 0,
     scrollWidth: 0,
@@ -230,9 +239,13 @@ function fakeDocument(crateJson, { rejectFullscreen = false } = {}) {
     "crate-data": { textContent: JSON.stringify(crateJson) },
     "list-view": makeElement(),
     "song-view": makeElement(),
-    "menu-bar": makeElement(),
+    "app-bar": makeElement(),
+    "menu-bar-overflow-toggle": makeElement(),
+    "menu-bar-overflow": makeElement(),
     "song-view-title": makeElement(),
     "song-content": makeElement(),
+    "song-header": makeElement(),
+    "song-pages": makeElement(),
     "song-list": makeElement(),
     "prev-song-button": makeElement(),
     "next-song-button": makeElement(),
@@ -241,6 +254,8 @@ function fakeDocument(crateJson, { rejectFullscreen = false } = {}) {
     "capo-select": makeElement(),
     "instrument-select": makeElement(),
     "chord-diagrams": makeElement(),
+    "toggle-chords-button": makeElement(),
+    "toggle-chords-glyph": makeElement(),
     "print-song-button": makeElement(),
     "print-book-button": makeElement(),
     "print-view": makeElement(),
@@ -316,9 +331,10 @@ function isHidden(element) {
 
   assert.equal(isHidden(elements["list-view"]), false);
   assert.equal(isHidden(elements["song-view"]), true);
-  assert.equal(isHidden(elements["menu-bar"]), true);
   assert.equal(isHidden(elements["prev-song-button"]), true);
   assert.equal(isHidden(elements["next-song-button"]), true);
+  assert.equal(isHidden(elements["back-to-list-button"]), true);
+  assert.equal(isHidden(elements["menu-bar-overflow"]), true);
 
   // Two canonical songs, alphabetically sorted — the setlist-entry proxy
   // ("Amazing", no "text") is absent.
@@ -362,15 +378,16 @@ function isHidden(element) {
 
   assert.equal(isHidden(elements["list-view"]), true);
   assert.equal(isHidden(elements["song-view"]), false);
-  assert.equal(isHidden(elements["menu-bar"]), false);
   assert.equal(isHidden(elements["prev-song-button"]), false);
   assert.equal(isHidden(elements["next-song-button"]), false);
+  assert.equal(isHidden(elements["back-to-list-button"]), false);
+  assert.equal(isHidden(elements["menu-bar-overflow"]), false);
   assert.equal(elements["song-view-title"].textContent, "Amazing Grace");
 
   // Rendered by chordprobook's real renderSong(), not a stub — chord
   // brackets become inlineChord spans, matching that library's own tests.
-  assert.ok(elements["song-content"].innerHTML.includes('<span class="inlineChord">[G]</span>'));
-  assert.ok(elements["song-content"].innerHTML.includes('<span class="inlineChord">[G7]</span>'));
+  assert.ok(elements["song-pages"].innerHTML.includes('<span class="inlineChord">[G]</span>'));
+  assert.ok(elements["song-pages"].innerHTML.includes('<span class="inlineChord">[G7]</span>'));
 
   // First song: previous is disabled, next is not.
   assert.equal(elements["prev-song-button"].disabled, true);
@@ -414,8 +431,8 @@ function isHidden(element) {
   elements["capo-select"].dispatch("change");
 
   // G down 2 semitones is F.
-  assert.ok(elements["song-content"].innerHTML.includes('<span class="inlineChord">[F]</span>'));
-  assert.ok(elements["song-content"].innerHTML.includes('<span class="inlineChord">[F7]</span>'));
+  assert.ok(elements["song-pages"].innerHTML.includes('<span class="inlineChord">[F]</span>'));
+  assert.ok(elements["song-pages"].innerHTML.includes('<span class="inlineChord">[F7]</span>'));
   assert.equal(elements["capo-select"].children[2].selected, true);
 }
 
@@ -430,13 +447,13 @@ function isHidden(element) {
 
   elements["capo-select"].value = "2";
   elements["capo-select"].dispatch("change");
-  assert.ok(elements["song-content"].innerHTML.includes('<span class="inlineChord">[F]</span>'));
+  assert.ok(elements["song-pages"].innerHTML.includes('<span class="inlineChord">[F]</span>'));
 
   elements["key-select"].value = "D";
   elements["key-select"].dispatch("change");
 
-  assert.ok(elements["song-content"].innerHTML.includes('<span class="inlineChord">[D]</span>'));
-  assert.ok(elements["song-content"].innerHTML.includes('<span class="inlineChord">[D7]</span>'));
+  assert.ok(elements["song-pages"].innerHTML.includes('<span class="inlineChord">[D]</span>'));
+  assert.ok(elements["song-pages"].innerHTML.includes('<span class="inlineChord">[D7]</span>'));
   assert.equal(elements["capo-select"].children[0].selected, true); // back to "No Capo"
 }
 
@@ -504,6 +521,7 @@ function isHidden(element) {
   assert.equal(isHidden(elements["key-select"]), true);
   assert.equal(isHidden(elements["capo-select"]), true);
   assert.equal(isHidden(elements["instrument-select"]), true);
+  assert.equal(isHidden(elements["toggle-chords-button"]), true);
   assert.equal(elements["key-select"].children.length, 0);
   assert.equal(elements["capo-select"].children.length, 0);
 }
@@ -600,11 +618,94 @@ function isHidden(element) {
 
   elements["key-select"].value = "D";
   elements["key-select"].dispatch("change");
-  assert.ok(elements["song-content"].innerHTML.includes('<span class="inlineChord">[D]</span>'));
+  assert.ok(elements["song-pages"].innerHTML.includes('<span class="inlineChord">[D]</span>'));
 
   elements["next-song-button"].click(); // -> Universe, key C, untouched
-  assert.ok(elements["song-content"].innerHTML.includes('<span class="inlineChord">[C]</span>'));
+  assert.ok(elements["song-pages"].innerHTML.includes('<span class="inlineChord">[C]</span>'));
   assert.equal(elements["key-select"].children.find((o) => o.value === "C").selected, true);
+}
+
+/* ---------- hide/show chords toggle (small-screen overflow menu) ---------- */
+
+{
+  // Visible whenever the song has chords, labelled "Hide chords" (in
+  // title/aria-label, not textContent — it's a fixed-size icon button now,
+  // "[C]" always, same reasoning as #fullscreen-button's own label) until
+  // clicked — same hasChords gate as instrument-select, above.
+  const { doc, elements } = fakeDocument(CRATE_JSON);
+  initSongbookApp(doc, fakeWindow());
+  songLink(elements, 0).click(); // Amazing Grace
+
+  assert.equal(isHidden(elements["toggle-chords-button"]), false);
+  assert.equal(elements["toggle-chords-button"].title, "Hide chords");
+  assert.equal(elements["toggle-chords-button"].getAttribute("aria-label"), "Hide chords");
+  assert.equal(elements["toggle-chords-glyph"].classList.contains("struck"), false);
+  assert.equal(elements["song-content"].classList.contains("chords-hidden"), false);
+
+  elements["toggle-chords-button"].click();
+  assert.equal(elements["toggle-chords-button"].title, "Show chords");
+  assert.equal(elements["toggle-chords-glyph"].classList.contains("struck"), true);
+  assert.equal(elements["song-content"].classList.contains("chords-hidden"), true);
+
+  elements["toggle-chords-button"].click();
+  assert.equal(elements["toggle-chords-button"].title, "Hide chords");
+  assert.equal(elements["toggle-chords-glyph"].classList.contains("struck"), false);
+  assert.equal(elements["song-content"].classList.contains("chords-hidden"), false);
+}
+
+{
+  // Global for the session, like currentInstrument, not reset per song —
+  // stays hidden across a next/previous move to a different song.
+  const { doc, elements } = fakeDocument(CRATE_JSON);
+  initSongbookApp(doc, fakeWindow());
+  songLink(elements, 0).click(); // Amazing Grace
+
+  elements["toggle-chords-button"].click();
+  assert.equal(elements["song-content"].classList.contains("chords-hidden"), true);
+
+  elements["next-song-button"].click(); // Universe
+  assert.equal(elements["song-content"].classList.contains("chords-hidden"), true);
+  assert.equal(elements["toggle-chords-button"].title, "Show chords");
+  assert.equal(elements["toggle-chords-glyph"].classList.contains("struck"), true);
+}
+
+/* ---------- small-screen overflow menu (instrument select / hide-chords button) ---------- */
+
+{
+  // The hamburger toggle just flips .open on #menu-bar-overflow — the
+  // breakpoint that decides whether that's visually meaningful is CSS-only
+  // (see songbook_html.js's own #menu-bar-overflow-toggle/#menu-bar-overflow
+  // rules), so this only checks the class, not layout. It also sets an
+  // explicit top on open, computed from #app-bar's own rect — position:
+  // fixed (not absolute — see that rule's own CSS comment for why) means
+  // CSS alone can't express "just under the bar" the way top: 100% could
+  // for an absolutely positioned element, so this is the regression test
+  // for the dropdown actually landing under the bar rather than at the top
+  // of the viewport (where a fixed element with no top override would sit).
+  const { doc, elements } = fakeDocument(CRATE_JSON);
+  initSongbookApp(doc, fakeWindow());
+  songLink(elements, 0).click();
+  elements["app-bar"].getBoundingClientRect = () => ({ bottom: 52 });
+
+  assert.equal(elements["menu-bar-overflow"].classList.contains("open"), false);
+  elements["menu-bar-overflow-toggle"].click();
+  assert.equal(elements["menu-bar-overflow"].classList.contains("open"), true);
+  assert.equal(elements["menu-bar-overflow"].style.top, "58px"); // 52 + 6
+  elements["menu-bar-overflow-toggle"].click();
+  assert.equal(elements["menu-bar-overflow"].classList.contains("open"), false);
+}
+
+{
+  // Opening the overflow menu then moving to another song closes it again —
+  // showSong() resets it, the same way it resets other song-view state.
+  const { doc, elements } = fakeDocument(CRATE_JSON);
+  initSongbookApp(doc, fakeWindow());
+  songLink(elements, 0).click();
+  elements["menu-bar-overflow-toggle"].click();
+  assert.equal(elements["menu-bar-overflow"].classList.contains("open"), true);
+
+  elements["next-song-button"].click();
+  assert.equal(elements["menu-bar-overflow"].classList.contains("open"), false);
 }
 
 /* ---------- remembering a key/capo choice for the session (sessionStorage) ---------- */
@@ -625,12 +726,12 @@ function isHidden(element) {
   elements["key-select"].dispatch("change");
   elements["capo-select"].value = "2";
   elements["capo-select"].dispatch("change");
-  assert.ok(elements["song-content"].innerHTML.includes('<span class="inlineChord">[C]</span>')); // D - 2 = C
+  assert.ok(elements["song-pages"].innerHTML.includes('<span class="inlineChord">[C]</span>')); // D - 2 = C
 
   elements["next-song-button"].click(); // -> Universe
   elements["prev-song-button"].click(); // back to Amazing Grace
 
-  assert.ok(elements["song-content"].innerHTML.includes('<span class="inlineChord">[C]</span>')); // still D capo 2
+  assert.ok(elements["song-pages"].innerHTML.includes('<span class="inlineChord">[C]</span>')); // still D capo 2
   assert.equal(elements["key-select"].children.find((o) => o.value === "D").selected, true);
   assert.equal(elements["capo-select"].children.find((o) => o.value === "2").selected, true);
 
@@ -642,7 +743,7 @@ function isHidden(element) {
   const { doc: doc2, elements: elements2 } = fakeDocument(CRATE_JSON);
   initSongbookApp(doc2, win);
   songLink(elements2, 0).click(); // Amazing Grace, opened fresh
-  assert.ok(elements2["song-content"].innerHTML.includes('<span class="inlineChord">[C]</span>'));
+  assert.ok(elements2["song-pages"].innerHTML.includes('<span class="inlineChord">[C]</span>'));
 }
 
 {
@@ -663,7 +764,7 @@ function isHidden(element) {
     elements["key-select"].value = "D";
     elements["key-select"].dispatch("change");
   });
-  assert.ok(elements["song-content"].innerHTML.includes('<span class="inlineChord">[D]</span>'));
+  assert.ok(elements["song-pages"].innerHTML.includes('<span class="inlineChord">[D]</span>'));
 }
 
 /* ---------- print mode: replaces the current screen, not a new window ---------- */
@@ -682,7 +783,8 @@ function isFittedFontSize(value) {
 
   assert.equal(isHidden(elements["list-view"]), true);
   assert.equal(isHidden(elements["song-view"]), true);
-  assert.equal(isHidden(elements["menu-bar"]), true);
+  assert.equal(isHidden(elements["back-to-list-button"]), true);
+  assert.equal(isHidden(elements["menu-bar-overflow"]), true);
   assert.equal(isHidden(elements["print-view"]), false);
   assert.equal(elements["print-content"].children.length, 1); // one page, this song only
 
@@ -835,15 +937,21 @@ function isFittedFontSize(value) {
   const { doc, elements } = fakeDocument(CRATE_JSON);
   initSongbookApp(doc, fakeWindow());
 
-  assert.equal(elements["fullscreen-button"].textContent, "Full screen");
+  // The label lives in title/aria-label, not textContent — the button is a
+  // fixed-size icon square (shared with prev/next/print), and full text as
+  // textContent would wrap and overflow a box that small.
+  assert.equal(elements["fullscreen-button"].title, "Full screen");
+  assert.equal(elements["fullscreen-button"].getAttribute("aria-label"), "Full screen");
 
   elements["fullscreen-button"].click();
   assert.equal(doc.fullscreenElement, doc.documentElement);
-  assert.equal(elements["fullscreen-button"].textContent, "Exit full screen");
+  assert.equal(elements["fullscreen-button"].title, "Exit full screen");
+  assert.equal(elements["fullscreen-button"].getAttribute("aria-label"), "Exit full screen");
 
   elements["fullscreen-button"].click();
   assert.equal(doc.fullscreenElement, null);
-  assert.equal(elements["fullscreen-button"].textContent, "Full screen");
+  assert.equal(elements["fullscreen-button"].title, "Full screen");
+  assert.equal(elements["fullscreen-button"].getAttribute("aria-label"), "Full screen");
 }
 
 {
@@ -904,9 +1012,10 @@ function isFittedFontSize(value) {
 
   assert.equal(isHidden(elements["list-view"]), false);
   assert.equal(isHidden(elements["song-view"]), true);
-  assert.equal(isHidden(elements["menu-bar"]), true);
   assert.equal(isHidden(elements["prev-song-button"]), true);
   assert.equal(isHidden(elements["next-song-button"]), true);
+  assert.equal(isHidden(elements["back-to-list-button"]), true);
+  assert.equal(isHidden(elements["menu-bar-overflow"]), true);
 }
 
 /* ---------- fitSongContent: exercised through showSong()/resize, not called directly — it's a closure private to initSongbookApp ---------- */
@@ -926,7 +1035,7 @@ function isFittedFontSize(value) {
   content.clientWidth = 300;
   Object.defineProperty(content, "scrollHeight", { get() { return (parseInt(content.style.fontSize) || 0) * 8; } });
   Object.defineProperty(content, "scrollWidth", { get() { return (parseInt(content.style.fontSize) || 0) * 3; } });
-  elements["menu-bar"].offsetHeight = 60;
+  elements["app-bar"].offsetHeight = 60;
 
   const win = fakeWindow({ innerHeight: 800 }); // available height: 800 - 60 = 740
   initSongbookApp(doc, win);
@@ -950,7 +1059,7 @@ function isFittedFontSize(value) {
   content.clientWidth = 1000; // wide enough that width never binds here
   Object.defineProperty(content, "scrollHeight", { get() { return (parseInt(content.style.fontSize) || 0) * 10; } });
   Object.defineProperty(content, "scrollWidth", { get() { return (parseInt(content.style.fontSize) || 0) * 3; } });
-  elements["menu-bar"].offsetHeight = 60;
+  elements["app-bar"].offsetHeight = 60;
 
   const win = fakeWindow({ innerHeight: 800 });
   initSongbookApp(doc, win);
@@ -972,7 +1081,7 @@ function isFittedFontSize(value) {
   content.clientWidth = 300;
   content.scrollHeight = 10; // height is never the problem here
   content.scrollWidth = 5000; // ...but width never fits, at any font size
-  elements["menu-bar"].offsetHeight = 60;
+  elements["app-bar"].offsetHeight = 60;
 
   const win = fakeWindow({ innerHeight: 800 });
   initSongbookApp(doc, win);
@@ -992,7 +1101,7 @@ function isFittedFontSize(value) {
   content.clientWidth = 1000;
   Object.defineProperty(content, "scrollHeight", { get() { return (parseInt(content.style.fontSize) || 0) * 8; } });
   Object.defineProperty(content, "scrollWidth", { get() { return (parseInt(content.style.fontSize) || 0) * 3; } });
-  elements["menu-bar"].offsetHeight = 60;
+  elements["app-bar"].offsetHeight = 60;
 
   const win = fakeWindow({ innerHeight: 800 }); // 800 - 60 = 740; 8*80=640 fits -> 80px
   initSongbookApp(doc, win);
@@ -1005,6 +1114,94 @@ function isFittedFontSize(value) {
   // code, not a Workflow script; the wait below is for the debounce alone.
   await new Promise((resolve) => setTimeout(resolve, 250));
   assert.equal(content.style.fontSize, "17px"); // 8*17=136<=140, 8*18=144>140
+}
+
+/* ---------- fitSongHeaderTitle: keeps title/key/capo on one line (SPEC.md §12) ---------- */
+
+{
+  // A very short song drives the body font-size all the way to its own
+  // ceiling (80px — see the fitSongContent tests above) — 1.3x that (104)
+  // would make the title dominate the page, so TITLE_MAX_FONT_PX (36) caps
+  // it regardless of how much header width is actually available (2000px
+  // here — plenty).
+  const { doc, elements } = fakeDocument(CRATE_JSON);
+  const content = elements["song-content"];
+  const title = elements["song-view-title"];
+  const header = elements["song-header"];
+  content.clientWidth = 1000;
+  Object.defineProperty(content, "scrollHeight", { get() { return (parseInt(content.style.fontSize) || 0) * 8; } });
+  Object.defineProperty(content, "scrollWidth", { get() { return (parseInt(content.style.fontSize) || 0) * 3; } });
+  elements["app-bar"].offsetHeight = 60;
+  header.clientWidth = 2000;
+  Object.defineProperty(title, "scrollWidth", { get() { return (parseInt(title.style.fontSize) || 0) * 5; } });
+
+  const win = fakeWindow({ innerHeight: 800 }); // body settles at 80px (see fitSongContent tests)
+  initSongbookApp(doc, win);
+  songLink(elements, 0).click(); // Amazing Grace — has chords, so key/capo are shown
+
+  assert.equal(content.style.fontSize, "80px");
+  assert.equal(title.style.fontSize, "36px"); // TITLE_MAX_FONT_PX, not 80 * 1.3 (104)
+}
+
+{
+  // A more modest body font-size (20px, well under the point where
+  // TITLE_MAX_FONT_PX would bind — 1.3x that is 26, already below the 36
+  // cap) and a header too narrow for the title at that size once key/capo's
+  // own reserved width is taken into account: the title has to shrink below
+  // its own proportional ceiling to keep all three on one line, landing on
+  // a real binary-search result (20px) rather than either boundary.
+  const { doc, elements } = fakeDocument(CRATE_JSON);
+  const content = elements["song-content"];
+  const title = elements["song-view-title"];
+  const header = elements["song-header"];
+  const keySelect = elements["key-select"];
+  const capoSelect = elements["capo-select"];
+  content.clientWidth = 1000; // wide enough that width never binds the body fit
+  Object.defineProperty(content, "scrollHeight", { get() { return (parseInt(content.style.fontSize) || 0) * 40; } });
+  Object.defineProperty(content, "scrollWidth", { get() { return (parseInt(content.style.fontSize) || 0) * 3; } });
+  elements["app-bar"].offsetHeight = 0;
+  header.clientWidth = 160;
+  keySelect.offsetWidth = 30;
+  capoSelect.offsetWidth = 25;
+  Object.defineProperty(title, "scrollWidth", { get() { return (parseInt(title.style.fontSize) || 0) * 4; } });
+
+  const win = fakeWindow({ innerHeight: 800 }); // 20 * 40 = 800 <= 800; 21 * 40 = 840 > 800
+  initSongbookApp(doc, win);
+  songLink(elements, 0).click();
+  assert.equal(content.style.fontSize, "20px");
+
+  // ceiling = min(36, max(16, 20 * 1.3)) = 26; reserved = 30 + 25 +
+  // (20 * 0.6) * 2 = 79; available = 160 - 79 = 81. Largest fontPx (16..26)
+  // with fontPx * 4 <= 81 is 20 (80 <= 81, 84 > 81).
+  assert.equal(title.style.fontSize, "20px");
+}
+
+{
+  // A header too narrow for the title at *any* size, even TITLE_MIN_FONT_PX
+  // (16px) — settles on that floor rather than shrinking further into
+  // unreadable territory (SPEC.md §12); a real page relies on
+  // #song-view-title's own ellipsis CSS to make this look intentional
+  // rather than broken.
+  const { doc, elements } = fakeDocument(CRATE_JSON);
+  const content = elements["song-content"];
+  const title = elements["song-view-title"];
+  const header = elements["song-header"];
+  const keySelect = elements["key-select"];
+  const capoSelect = elements["capo-select"];
+  content.clientWidth = 1000;
+  Object.defineProperty(content, "scrollHeight", { get() { return (parseInt(content.style.fontSize) || 0) * 8; } });
+  Object.defineProperty(content, "scrollWidth", { get() { return (parseInt(content.style.fontSize) || 0) * 3; } });
+  elements["app-bar"].offsetHeight = 60;
+  header.clientWidth = 50; // already less than key/capo's own reserved width
+  keySelect.offsetWidth = 60;
+  capoSelect.offsetWidth = 50;
+  Object.defineProperty(title, "scrollWidth", { get() { return (parseInt(title.style.fontSize) || 0) * 4; } });
+
+  const win = fakeWindow({ innerHeight: 800 });
+  initSongbookApp(doc, win);
+  songLink(elements, 0).click();
+
+  assert.equal(title.style.fontSize, "16px"); // TITLE_MIN_FONT_PX, not lower
 }
 
 /* ---------- setlists: display and print (SPEC.md §6) — no editing/creation yet ---------- */
@@ -1095,7 +1292,7 @@ function isFittedFontSize(value) {
   // for this one performance slot, not the song's title (SPEC.md §6/§7).
   assert.equal(elements["song-view-title"].textContent, "Song B");
   // Song B is key C; the entry's capo:2 override shifts it down to Bb.
-  assert.ok(elements["song-content"].innerHTML.includes('<span class="inlineChord">[Bb]</span>'));
+  assert.ok(elements["song-pages"].innerHTML.includes('<span class="inlineChord">[Bb]</span>'));
 }
 
 {
@@ -1115,13 +1312,13 @@ function isFittedFontSize(value) {
 
   elements["next-song-button"].click(); // -> Song B (capo 2 override)
   assert.equal(elements["song-view-title"].textContent, "Song B");
-  assert.ok(elements["song-content"].innerHTML.includes('<span class="inlineChord">[Bb]</span>'));
+  assert.ok(elements["song-pages"].innerHTML.includes('<span class="inlineChord">[Bb]</span>'));
 
   elements["next-song-button"].click(); // -> Song A again (the ambiguous entry also resolved to it)
   assert.equal(elements["song-view-title"].textContent, "Song A");
   // No override on the ambiguous entry — back to Song A's own key (G), not
   // Bb-via-capo-2 left over from the entry before it.
-  assert.ok(elements["song-content"].innerHTML.includes('<span class="inlineChord">[G]</span>'));
+  assert.ok(elements["song-pages"].innerHTML.includes('<span class="inlineChord">[G]</span>'));
   assert.equal(elements["next-song-button"].disabled, true); // last of 3 playable entries
 
   elements["prev-song-button"].click(); // back to Song B

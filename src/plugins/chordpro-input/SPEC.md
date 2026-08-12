@@ -353,16 +353,64 @@ The page has five top-level views, each shown by hiding all the others (`setHidd
 toggles a `hidden` class — **not** `element.style.display` directly: setting
 `style.display = ""` clears an inline override and falls back to whatever the stylesheet
 itself specifies, which for these elements is itself `display: none`; the `.hidden` CSS rule
-carries `!important` because `#menu-bar`'s own `display: flex` is a higher-specificity ID
-selector that would otherwise beat a plain class rule while both apply):
+carries `!important` because e.g. `#back-to-list-button`'s own `display: inline-flex` would
+otherwise win on specificity while both apply):
 
 | View | Shown by | Contains |
 |---|---|---|
 | `#list-view` | `showList()` | all songs (searchable, scrollable), a "Print this songbook" button, a "Setlists" button (hidden if the crate has none) |
 | `#setlist-index-view` | `showSetlistIndex()` | every setlist by name |
 | `#setlist-view` | `showSetlist(index)` | one setlist's entries: position, heading, match-status badge, notes, print/notes-toggle controls |
-| `#song-view` | `showSong(position)` | one song, with the sticky `#menu-bar` (title, key/capo/instrument selects, prev/next, print) |
+| `#song-view` | `showSong(position)` | one song, with the sticky `#app-bar` (prev/next, fullscreen, instrument select, print, hide/show chords) and, inside `#song-content` itself, `#song-header` (title, key/capo — §12) |
 | `#print-view` | `enterPrintView()` | whatever's being printed (§12) |
+
+**`#app-bar`** is always mounted and sticky (not song-view-only — unlike everything else in
+the table above, it isn't one of the five hidden/shown views), and is always a single line:
+`flex-wrap: nowrap`, with `overflow-x: auto` as a fallback if a viewport is ever too narrow
+for its contents, rather than wrapping onto a second line. `#prev-song-button` is first, so
+it's leftmost by DOM order; `#next-song-button` gets its own `margin-left: auto` to push
+itself to the right edge — nothing else in the bar is elastic now that the title (which used
+to do that job by taking `flex: 1`) has moved into `#song-content` itself (§12), freeing up
+the bar's own height for song content. `#fullscreen-button` (visible in every view, including
+print, though it's excluded from the printed page itself — §12) sits right after
+`#prev-song-button`; every other control in the bar (`#back-to-list-button`, `#menu-bar-
+overflow`, `#menu-bar-overflow-toggle`, `#print-song-button`) is song-view-only and
+`setHidden()` individually by every view-switching function — there's no single wrapper
+element left whose own hidden state implies all of theirs, the way `#menu-bar-row2` once did
+in an earlier two-row version of this bar.
+
+**Small-screen overflow menu.** `#menu-bar-overflow` (a container for `#instrument-select`,
+`#toggle-chords-button`, and `#print-song-button` — print moved in here from its own place in
+the row specifically so a tight layout folds it under the hamburger menu too, rather than it
+staying a fourth icon competing for room in the row itself) is `display: contents` by default,
+so its children lay out as if they were direct `#app-bar` children, right in the single line,
+contributing no box of their own. Below a `640px` viewport width, it instead becomes a real
+box that opens as a dropdown under `#menu-bar-overflow-toggle`'s hamburger icon, rather than
+sitting inline or forcing a second row: detaching it from the flow entirely, instead of
+wrapping, is what keeps the bar a single line even here.
+
+That dropdown is `position: fixed`, not `absolute`, with its `top` set from
+`menuBarOverflowToggle`'s own click handler (`appBar.getBoundingClientRect().bottom`, plus a
+small gap) rather than a CSS `top: 100%`. `#app-bar` has `overflow-x: auto` (so the icon row
+itself can scroll rather than wrap on a truly tiny screen, per its own comment above) — and
+per the CSS overflow spec, setting `overflow-x` to anything but `visible` silently forces
+`overflow-y` to `auto` too. An absolutely-positioned dropdown's containing block would be
+`#app-bar` itself (its sticky positioning context), which is *also* the clipping ancestor
+under that forced `overflow-y: auto` — the dropdown would be clipped the instant it extended
+past `#app-bar`'s own bottom edge, which is exactly what a dropdown does, and exactly what
+made the hamburger menu appear to not work at all. `position: fixed`'s containing block is
+the viewport instead, which `#app-bar`'s own overflow has no say over — at the cost of
+needing an explicit `top`, which only JS (not a percentage in CSS) can express relative to
+the viewport.
+
+The `display: contents` switch and the dropdown's own positioning are CSS media-query rules
+(`@media (max-width: 640px)`), not JS: nothing in `initSongbookApp` reads viewport width
+itself, beyond the `top` calculation above. `menuBarOverflowToggle`'s click handler toggles an
+`.open` class on `#menu-bar-overflow` (setting `top` only when opening); `showSong()` clears
+that class on every song change so switching songs doesn't leave the menu open. This is purely
+a narrow-viewport layout concern — the fake-DOM test suite can check the class toggle itself
+but, per this file's own recurring caveat about that suite (§10), cannot verify the CSS
+breakpoint actually looks right on a real phone.
 
 **A setlist becomes the active browsing context once opened.** `getActivePlaylist()`
 returns either every song (global browsing) or, when `currentSetlistIndex >= 0`, one
@@ -407,11 +455,58 @@ height — `clamp()`/container query units size from the container's own dimensi
 how a given size makes a specific piece of text wrap. `fitSongContent` re-runs on window
 resize/orientation change, debounced 150ms.
 
-**Key/capo.** `#key-select`/`#capo-select` in the menu bar (`populateKeySelect`/
-`populateCapoSelect`). Choosing a key only ever changes which note it is, never switches
-major to minor or back. Choosing a key resets any capo choice to none. A song with no
-`{key}` directive gets a `+0`..`+11` semitone-offset dropdown instead of note names. Both
-are hidden entirely for a song with no chords at all (`ChordProSong.hasChords`). State
+**Title, key, capo.** `#song-header` — `#song-view-title`, `#key-select`/`#capo-select`
+(`populateKeySelect`/`populateCapoSelect`) — is the first child of `#song-content`, not part
+of `#app-bar`: `renderCurrentSong()` only ever overwrites `#song-pages`, `#song-content`'s
+*other* child, so `#song-header` and the listeners bound to its selects survive every
+re-render untouched. Living inside `#song-content` means it inherits whatever font-size
+`fitSongContent` (§12) computes for the song itself — set in `em` there deliberately, not
+`rem`, so title/key/capo scale up and down with the song rather than staying a fixed
+toolbar size, clamped in both directions (below) so a very short or very long song can't push
+the header to an absurd size — and participates in `#song-content`'s own column flow: CSS
+multi-column
+layout treats a container's children as one continuous flow regardless of how many there
+are, so as the first content, `#song-header` lands at the top of the *left* column when
+`.two-columns` is active, with no extra CSS needed for that placement beyond `break-inside:
+avoid-column` (keeping title and key/capo together as one unit rather than letting the
+column break fall between them).
+
+`#song-header` is `flex-wrap: nowrap` — title, key, and capo always stay on one row, never
+wrapping onto a second. What actually guarantees that fits is `fitSongHeaderTitle()`, called
+at the end of `fitSongContent` once the song's own font-size (and, through it, key/capo's
+own em-based widths) has settled: a binary search over `#song-view-title`'s own font-size,
+the same idea as `fitTextToBox` but bounded by the *header's* leftover width (`#song-header`'s
+own width minus whichever of `#key-select`/`#capo-select` are visible, minus a gap per
+visible one) rather than the whole page.
+
+Its ceiling is normally 1.3x the body's own font-size — matching what a plain `font-size:
+1.3em` would give the title — but clamped to `TITLE_MIN_FONT_PX`..`TITLE_MAX_FONT_PX` (16–36px)
+regardless: a very short song can drive the body font-size all the way to `FIT_MAX_FONT_PX`
+(80px), and 1.3x *that* would make the title dominate the page — a lot of width in
+single-column layouts, and height eaten out of what `fitSongContent` measured as available
+for the lyrics themselves — so `TITLE_MAX_FONT_PX` caps it there instead. `TITLE_MIN_FONT_PX`
+is the same idea in the other direction: this same short-song effect also inflates key/capo's
+own em-based width (`#key-select`/`#capo-select`'s own CSS caps *that* growth at `1.25rem` for
+the same reason, though it doesn't eliminate it), which used to leave the title almost no
+header width and shrink it to near-nothing to compensate; below this floor it ellipsis-
+truncates instead (`#song-view-title`'s own `white-space`/`overflow`/`text-overflow`) — a
+readable-but-truncated title beats a technically-whole but microscopic one. `fitTextToBox`
+gained two more optional parameters for this, `maxFontPx`/`minFontPx` (defaulting to
+`FIT_MAX_FONT_PX`/`FIT_MIN_FONT_PX` for its two original call sites, so their behaviour is
+unchanged).
+
+> **Keep in sync by hand:** `fitSongHeaderTitle`'s `SONG_HEADER_GAP_EM` constant
+> (`songbook_html.js`, currently `0.6`) and `#song-header`'s own `gap: 0.6em` in the `<style>`
+> block. `fitSongHeaderTitle` has no way to read the gap back out of the stylesheet — there's
+> no `getComputedStyle()` available (the test suite's fake DOM has no equivalent, and a real
+> browser would need a layout pass to resolve it) — so it keeps its own copy instead;
+> changing one without the other means it reserves the wrong width for the gaps between
+> title/key/capo.
+
+Choosing a key only ever changes which note it is, never switches major to minor or back.
+Choosing a key resets any capo choice to none. A song with no `{key}` directive gets a
+`+0`..`+11` semitone-offset dropdown instead of note names. Both selects are hidden entirely
+for a song with no chords at all (`ChordProSong.hasChords`). State
 (`currentTranspose`/`currentCapo`) resets to the song's own values on every song change
 unless a setlist entry override or a session-saved value (below) applies.
 
@@ -428,12 +523,30 @@ shape data for the chosen instrument is simply skipped (checked via
 (`chordpro-songbook:key-capo`), wrapped in try/catch since `sessionStorage` access is known
 to throw under `file://` in some browsers/privacy modes.
 
-**Full screen.** `#fullscreen-button`, fixed at the top-left of the page (positioned below
-the sticky menu bar's own height, not at literal `(0, 0)`, so it doesn't sit on top of
-`#prev-song-button`) — a plain toggle against `document.documentElement.requestFullscreen()`/
-`document.exitFullscreen()`, label kept in sync via the `fullscreenchange` event. Hidden in
-`@media print` alongside `#print-banner`, since being fixed-position and always mounted
-means it would otherwise appear on the printed page itself.
+**Full screen.** `#fullscreen-button`, right after `#prev-song-button` in `#app-bar` (§11) —
+a plain toggle against `document.documentElement.requestFullscreen()`/
+`document.exitFullscreen()`. The glyph itself never changes (it's a fixed-size icon square,
+shared with prev/next/print — §11); only `title`/`aria-label` ("Full screen"/"Exit full
+screen") update, via the `fullscreenchange` event — setting the full text as `textContent`
+on a box that small wraps and overflows it. Hidden in `@media print` alongside
+`#print-banner`, since `#app-bar` stays mounted and un-hidden across every view (including
+print) and would otherwise appear on the printed page itself.
+
+**Hide/show chords.** `#toggle-chords-button`, in `#menu-bar-overflow` alongside
+`#instrument-select`/`#print-song-button` — toggles the module-level `chordsHidden` flag and
+a `chords-hidden` class on `#song-content`, which the stylesheet uses to hide every
+`.inlineChord` span (`renderSong()`'s own chord-name markup). Global for the session like
+`currentInstrument`, not reset per song. Scoped deliberately to the inline chord names in the
+lyrics themselves, not `#chord-diagrams`: that panel is a separately opted-into feature (via
+instrument selection), not something this toggle also suppresses. Print is unaffected — a
+printed chart always shows its chords regardless of this on-screen preference, so the CSS
+rule targets `#song-content.chords-hidden` specifically, never `#print-content`.
+
+The button's own content is a fixed `[<span id="toggle-chords-glyph">C</span>]`, not a text
+label — like `#fullscreen-button` (above), it's an icon among icons now, so only
+`title`/`aria-label` change with state ("Hide chords"/"Show chords"); the visual state change
+is the glyph's C striking through (a `.struck` class on `#toggle-chords-glyph`, driven by
+`chordsHidden`) rather than any text swap.
 
 **Song search.** `#song-search` filters `#song-list`'s rows by case-insensitive substring
 match. Implemented over `Array.from(songListElement.children)`, not `.children.forEach`
