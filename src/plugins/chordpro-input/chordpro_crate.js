@@ -22,16 +22,15 @@ export const DEFAULT_SETLIST_SUFFIX = ".setlist.md";
 // somewhere in the finished graph (see addUsedPropertyDefinitions), the same
 // "only when it's actually there" discipline the austlang plugin follows for
 // its own custom fields. This list is deliberately short: title/key/composer/
-// notes/the entry-to-song link/the setlist-to-entry link all reuse standard
-// schema.org properties instead (name, musicalKey, composer, description,
-// specializationOf, hasPart) — see SPEC.md §7. What's left has no schema.org
-// equivalent at all: a capo/transpose value, a free-text artist credit, which
-// set/section an entry belongs to, and this plugin's own match-confidence
-// bookkeeping.
+// performer/subtitle/notes/the entry-to-song link/the setlist-to-entry link
+// all reuse standard schema.org properties instead (name, musicalKey,
+// composer, performer, subtitle, description, specializationOf, hasPart) —
+// see SPEC.md §7. What's left has no schema.org equivalent at all: a
+// capo/transpose value, which set/section an entry belongs to, and this
+// plugin's own match-confidence bookkeeping.
 const PROPERTY_DEFINITIONS = {
   "custom:capo": { "@id": "arcp://name,custom/terms#capo", "@type": "rdf:Property", name: "Capo" },
   "custom:transpose": { "@id": "arcp://name,custom/terms#transpose", "@type": "rdf:Property", name: "Transpose" },
-  "custom:artist": { "@id": "arcp://name,custom/terms#artist", "@type": "rdf:Property", name: "Artist" },
   "custom:setName": { "@id": "arcp://name,custom/terms#setName", "@type": "rdf:Property", name: "Set Name" },
   "custom:matchStatus": { "@id": "arcp://name,custom/terms#matchStatus", "@type": "rdf:Property", name: "Match Status" },
   "custom:matchCandidates": { "@id": "arcp://name,custom/terms#matchCandidates", "@type": "rdf:Property", name: "Match Candidates" },
@@ -82,13 +81,23 @@ function buildSongEntity(relativePath, rawText, songExtensions) {
 
   const entity = { "@id": relativePath, "@type": "MusicComposition", name: title, text: rawText };
   if (parsed.key) entity.musicalKey = parsed.key;
-  // schema.org's `composer` expects a Person/Organization reference; this
-  // plugin writes the ChordPro directive's free text directly instead of
-  // minting a Person entity for it (SPEC.md §5) — a deliberate, documented
-  // simplification, not an oversight.
+  // schema.org's `composer`/`performer` both expect a Person/Organization
+  // reference; this plugin writes the ChordPro directive's free text
+  // directly instead of minting a Person entity for either (SPEC.md §5) —
+  // a deliberate, documented simplification, not an oversight.
   if (parsed.composer) entity.composer = parsed.composer;
-  if (parsed.artist) entity["custom:artist"] = parsed.artist;
-  if (Number.isInteger(parsed.capo)) entity["custom:capo"] = parsed.capo;
+  if (parsed.artist) entity.performer = parsed.artist;
+  if (parsed.subtitle) entity.subtitle = parsed.subtitle;
+  // A string, not the number ChordProSong itself parses {capo} into
+  // (SPEC.md §5) — every other extracted directive here is a plain string
+  // already (musicalKey/composer/transpose can all hold non-numeric text,
+  // e.g. a transpose target like "Em"), and capo's own crate representation
+  // follows that same convention rather than being the one property with a
+  // real JS number for a value. This is scoped to the Song entity's own
+  // {capo} only — a setlist entry's own capo override (SPEC.md §6, from a
+  // completely different parser, Setlist.js) is unaffected and stays a
+  // number (see buildSetlistEntities, below).
+  if (Number.isInteger(parsed.capo)) entity["custom:capo"] = String(parsed.capo);
   if (parsed.transpose) entity["custom:transpose"] = parsed.transpose;
 
   return { entity, title };
@@ -120,6 +129,11 @@ function buildSetlistEntities(relativePath, rawText, songs, setlistSuffix) {
       "custom:matchStatus": match.matchStatus,
     };
     if (entry.transpose !== undefined) entryEntity["custom:transpose"] = entry.transpose;
+    // A number here, not the string a Song entity's own {capo} becomes
+    // (buildSongEntity, above) — this comes from Setlist.js's own inline
+    // `{capo: N}` override parsing (SPEC.md §6), a different parser with no
+    // string-everywhere convention of its own to match, and this value is
+    // only ever read back as a number (songbook_html.js's own entriesById).
     if (Number.isInteger(entry.capo)) entryEntity["custom:capo"] = entry.capo;
     if (entry.notes) entryEntity.description = entry.notes;
     if (match.song) entryEntity.specializationOf = { "@id": match.song.id };

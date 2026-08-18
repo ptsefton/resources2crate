@@ -112,11 +112,16 @@ assert.equal(amazingGrace.name, "Amazing Grace");
 assert.equal(amazingGrace.musicalKey, "G");
 assert.equal(amazingGrace.text, readFileSync(path.join(fixturesDir, "AmazingGrace.cho.txt"), "utf8"));
 assert.equal("composer" in amazingGrace, false); // no {composer} directive in this file
-assert.equal("custom:artist" in amazingGrace, false); // no {subtitle}/{artist} directive in this file
+assert.equal("performer" in amazingGrace, false); // no {artist} directive in this file
+assert.equal("subtitle" in amazingGrace, false); // no {subtitle}/{st} directive in this file
 assert.equal("custom:capo" in amazingGrace, false); // no {capo} directive anywhere in the fixture set
 
+// {st: Peter Sefton} — a *subtitle* directive, not {artist}, so it lands on
+// `subtitle`, not `performer` (SPEC.md §5/§7 — the two used to be one
+// conflated field, custom:artist).
 const iCalledYourName = byId.get("i_called_your_name.cho.txt");
-assert.equal(iCalledYourName["custom:artist"], "Peter Sefton");
+assert.equal(iCalledYourName.subtitle, "Peter Sefton");
+assert.equal("performer" in iCalledYourName, false);
 assert.equal(iCalledYourName["custom:transpose"], "+7");
 
 /* ---------- Setlist + setlist-entry entities ---------- */
@@ -174,19 +179,25 @@ for (const entry of entries) assert.equal("custom:matchCandidates" in entry, fal
 
 const propertyDefIds = byType("rdf:Property").map((entity) => entity["@id"]);
 for (const expected of [
-  "arcp://name,custom/terms#artist", "arcp://name,custom/terms#transpose",
+  "arcp://name,custom/terms#transpose",
   "arcp://name,custom/terms#setName", "arcp://name,custom/terms#matchStatus",
 ]) {
   assert.ok(propertyDefIds.includes(expected), `expected an rdf:Property definition for ${expected}`);
 }
-// musicalKey/hasPart/specializationOf/description are all standard schema.org
-// properties (SPEC.md §7) — they must NOT get a custom rdf:Property definition
-// even though they're used throughout this crate; {capo}/{composer} and an
-// ambiguous match simply don't occur anywhere in this fixture set, so those
-// stay absent for the more familiar "never used" reason.
+// musicalKey/hasPart/specializationOf/description/performer/subtitle are all
+// standard schema.org properties (SPEC.md §7) — they must NOT get a custom
+// rdf:Property definition even though performer/subtitle are used in this
+// very fixture set (iCalledYourName's own {st}, above). custom:artist is
+// gone entirely now (the property {artist}/{subtitle} used to share, before
+// the split) — no fixture, past or future, should ever mint it again.
+// {capo}/{composer} and an ambiguous match simply don't occur anywhere in
+// this fixture set, so those stay absent for the more familiar "never used"
+// reason.
 for (const unexpected of [
   "arcp://name,custom/terms#musicalKey", "arcp://name,custom/terms#hasPart",
   "arcp://name,custom/terms#specializationOf", "arcp://name,custom/terms#description",
+  "arcp://name,custom/terms#performer", "arcp://name,custom/terms#subtitle",
+  "arcp://name,custom/terms#artist",
   "arcp://name,custom/terms#capo", "arcp://name,custom/terms#composer", "arcp://name,custom/terms#matchCandidates",
 ]) {
   assert.equal(propertyDefIds.includes(unexpected), false, `did not expect an rdf:Property definition for ${unexpected}`);
@@ -202,6 +213,36 @@ assert.equal(messages.some((m) => m.includes("Warning")), false);
 {
   const emptyResult = await buildCrateFromChordProFolder(memoryDirHandle("empty", {}), {}, () => {});
   assert.equal(emptyResult, null);
+}
+
+/* ---------- {capo}/{artist}: not exercised by the main fixture set above ---------- */
+
+{
+  // A string, not the number ChordProSong itself parses {capo} into
+  // (buildSongEntity, SPEC.md §5) — every other extracted directive on a
+  // Song entity is already a plain string (musicalKey/composer/transpose
+  // can all hold non-numeric text), and capo's own crate representation
+  // follows that convention now too. {artist} — distinct from {subtitle}/
+  // {st}, which the main fixture set above already covers via
+  // i_called_your_name.cho.txt — becomes `performer`.
+  const tree = {
+    "capo_and_artist.cho.txt": Buffer.from(
+      "{title: Capo Test}\n{artist: The Testers}\n{capo: 2}\n{key: D}\n[D]Some lyrics",
+    ),
+  };
+  const result = await buildCrateFromChordProFolder(memoryDirHandle("root", tree), {}, () => {});
+  const graph = result.crate.toJSON()["@graph"];
+  const song = graph.find((entity) => entity["@id"] === "capo_and_artist.cho.txt");
+  assert.equal(song["custom:capo"], "2");
+  assert.equal(typeof song["custom:capo"], "string");
+  assert.equal(song.performer, "The Testers");
+  assert.equal("subtitle" in song, false);
+
+  const propertyIds = graph
+    .filter((entity) => (Array.isArray(entity["@type"]) ? entity["@type"] : [entity["@type"]]).includes("rdf:Property"))
+    .map((entity) => entity["@id"]);
+  assert.ok(propertyIds.includes("arcp://name,custom/terms#capo"));
+  assert.equal(propertyIds.includes("arcp://name,custom/terms#artist"), false); // no such property any more
 }
 
 console.log("test-chordpro-crate.mjs: all assertions passed.");
