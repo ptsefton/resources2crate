@@ -26,7 +26,10 @@ It has three Stages:
   just wrote and produces `songbook.html`, a single file containing the crate's own data
   plus a client-side app that displays it — a song list, individual song views with
   transposition and chord diagrams, setlists, and a print mode. This file is meant to be
-  opened directly (including as a `file://` URL) with no server and no build step.
+  opened directly (including as a `file://` URL) with no server and no build step. A
+  chordpro-mode build never runs `ro-crate-html-output`'s own static-site rendering — that
+  machinery targets generic tabular/document crates, not this one — so `ro-crate-preview.html`
+  becomes a small redirect to `songbook.html` instead (§10).
 
 The three stages depend on [`chordprobook`](https://github.com/ptsefton/chordprobook) (a sibling
 repository, `"chordprobook": "file:../chordprobook"` in `package.json`) for ChordPro/setlist
@@ -332,8 +335,7 @@ person writing song/setlist files, has not yet been written.
 ## 10. Songbook HTML output — what the file contains
 
 `renderSongbookHtml(crateJson)` in `songbook_html.js` produces one self-contained HTML file,
-written as `songbook.html` alongside (not replacing) `ro-crate-html-output`'s own
-`ro-crate-preview.html`. It contains three `<script>` elements, all **classic, not
+written as `songbook.html`. It contains three `<script>` elements, all **classic, not
 `type="module"`** — a module script's cross-origin rules block it entirely when the page is
 opened as a `file://` URL, which is how this file is meant to be opened:
 
@@ -344,6 +346,28 @@ opened as a `file://` URL, which is how this file is meant to be opened:
 3. A classic `<script>` invoking `initSongbookApp(document, window)` — a plain function
    exported from `songbook_html.js` and embedded via `.toString()` (its actual source, not
    a hand-written duplicate), constituting the entire client-side app.
+
+**`ro-crate-preview.html` is a redirect to this file, not a second preview.**
+`ro-crate-html-output/index.js`'s own `OUTPUT_WRITE` hook guards on
+`ctx.options.inputMode === "chordpro"` — for every other mode it runs the usual
+ro-crate-static-site rendering (`crateToPreviewHtml`/`crateToMultiPageHtml`), but for chordpro
+mode it skips that entirely (before ever touching `ctx.crate`) and writes a small,
+purpose-built redirect page instead (`buildChordproRedirectHtml`, same file). `songbook.html`
+is this mode's real preview; a second, generic rendering of the same crate would be redundant
+and wouldn't render a song/setlist crate meaningfully anyway. `ro-crate-preview.html` is kept
+as a real (if trivial) file rather than omitted because `main.js`'s own "Show" step still
+expects an `HTML_FILE` to open when one exists, ahead of falling back to JSON/xlsx.
+
+That redirect page posts the same `{ source: "r2c-preview", page: "songbook.html" }` message
+`main.js`'s own `PREVIEW_NAV_SCRIPT` sends on a click-through, directly on load, rather than a
+plain relative-URL navigation: the app's own preview popup (`openHtmlInNewTab`/
+`openPageInPreview`) shows crate-generated pages via `blob:` URLs, which a normal relative
+`href`/`location` change can't navigate away from correctly. `window.opener` is what makes
+this work from inside that popup; opened with no opener at all (a real `file://` URL, e.g.
+someone double-clicking it outside the app), it falls back to a plain
+`window.location.replace("songbook.html")` instead. Tested by
+`tests/test-chordpro-preview-redirect.mjs` (top-level `tests/`, not this plugin's own folder —
+the code under test is `ro-crate-html-output/index.js`, not anything in `chordpro-input/`).
 
 **Embedding chordprobook.** `initSongbookApp` calls `ChordProSong`, `renderSong`,
 `Transposer`, and `ChordDiagram` as bare globals, since nothing can `import` anything once

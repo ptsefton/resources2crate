@@ -35,7 +35,10 @@ import {
 } from "./generated/chordprobook_browser_bundle.js";
 
 const CRATE_FILE = "ro-crate-metadata.json";
-const OUTPUT_FILE = "songbook.html";
+// Exported so ro-crate-html-output/index.js can point its own chordpro-mode
+// redirect page (ro-crate-preview.html) at this file's actual name, rather
+// than a second, hand-kept-in-sync copy of the string.
+export const OUTPUT_FILE = "songbook.html";
 
 // A canonical Song entity, not a setlist-entry proxy — both are typed
 // MusicComposition (chordpro-input's own SPEC.md §7), told apart by

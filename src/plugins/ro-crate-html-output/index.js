@@ -10,6 +10,7 @@ import { crateToPreviewHtml, crateToMultiPageHtml } from "../../crate.js";
 import { writeFile, writeFileAtPath, readJsonFromFolder, readFileTextFromDirectory, verifyPermission, fileExists } from "../../fs_helpers.js";
 import { bustCacheUrl, buildGitHubTreeUrl, fetchGitHubTextFile, listGitHubFolder } from "../../github.js";
 import { resolveProfileGroups } from "./layout.js";
+import { OUTPUT_FILE as SONGBOOK_FILE } from "../chordpro-input/songbook_html.js";
 
 const HTML_FILE = "ro-crate-preview.html";
 const MULTIPAGE_DIR = "ro-crate-preview_html";
@@ -59,6 +60,39 @@ function applyCollectionLabelOverrides(crate, options) {
       });
     }
   }
+}
+
+// A chordpro-mode build never runs the ro-crate-static-site machinery below
+// (see the OUTPUT_WRITE guard that calls this) — that machinery renders
+// generic tabular/document crates, not a song/setlist one, and
+// songbook_html.js's own songbook.html is this mode's real, purpose-built
+// preview. This is a deliberately blank redirect to it, not an omitted file:
+// main.js's "Show" step still expects an HTML_FILE to open (whichever of
+// JSON/HTML/xlsx exists first), and the app's own preview popup navigates
+// between crate-generated pages by posting a message to window.opener (see
+// main.js's PREVIEW_NAV_SCRIPT/openPageInPreview/handlePreviewMessage)
+// rather than a normal relative-URL page load — which wouldn't resolve
+// against the blob: URL that popup's current page actually has. Posting
+// that same message directly, on load, is what hands this page off to
+// songbook.html immediately inside that popup, with no click needed. Opened
+// on its own (a real file:// URL, no app/opener involved — e.g. someone
+// double-clicking it in Finder), it falls back to a plain relative redirect
+// instead, since window.opener is then null.
+function buildChordproRedirectHtml(targetFile) {
+  return `<!doctype html>
+<html>
+<head><meta charset="utf-8" /><title>Redirecting to ${targetFile}…</title></head>
+<body>
+<script>
+if (window.opener) {
+  window.opener.postMessage({ source: "r2c-preview", page: ${JSON.stringify(targetFile)} }, "*");
+} else {
+  window.location.replace(${JSON.stringify(targetFile)});
+}
+</script>
+</body>
+</html>
+`;
 }
 
 function formatDurationMs(ms) {
@@ -423,6 +457,14 @@ export const plugin = {
       if (!options.makeHtml) return;
       if (!(options.overwrite || !(await fileExists(dirHandle, HTML_FILE)))) {
         log(`${HTML_FILE} exists and overwrite is off — skipped.`, "warn");
+        return;
+      }
+      if (options.inputMode === "chordpro") {
+        const html = buildChordproRedirectHtml(SONGBOOK_FILE);
+        await writeFile(dirHandle, HTML_FILE, html);
+        log(`${HTML_FILE}: chordpro mode — wrote a redirect to ${SONGBOOK_FILE} instead of a static-site preview.`, "ok");
+        ctx.buildHtml = html;
+        ctx.lastHtmlTemplate = null;
         return;
       }
       try {
