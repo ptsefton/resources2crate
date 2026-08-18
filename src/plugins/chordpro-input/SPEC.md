@@ -294,6 +294,8 @@ src/plugins/chordpro-input/
   st_directive.js              isomorphic {st:} match/rewrite core — see §15
   fix_st_directive_ui.js       browser-only shell (folder walk, zip backup, write-back) — see §15
   test-st-directive.mjs        unit tests for st_directive.js
+  build-songbook.mjs            standalone Node CLI: builds songbook.html with no browser/app
+                               UI involved — see §10
 ```
 
 `chordprobook` is dynamically imported from `buildCrate` (via `chordpro_crate.js`, itself
@@ -302,6 +304,17 @@ a chordpro build actually runs.
 
 Tests are colocated with the plugin's own code, discovered recursively by
 `scripts/run-tests.mjs`, rather than living under the top-level `tests/` folder.
+
+**This plugin is meant to eventually move into its own repository**, installable standalone
+without resources2crate at all — nothing decided yet about packaging or distribution, but it's
+why `build-songbook.mjs` (§10) is written to depend on nothing outside this folder besides
+Node builtins and the `chordprobook` npm package this plugin already requires regardless, and
+why `st_directive.js` (§15) is a pure, dependency-free module in the same spirit. Everything
+else here — `chordpro_crate.js`'s own imports of `crate.js`'s `GENERATED_FILENAMES`/
+`CONTROL_FILENAMES`, `fix_st_directive_ui.js`'s of `fs_helpers.js`, `songbook_html.js`'s
+`HOOKS`-tapped plugin object itself — still reaches into resources2crate proper, since those
+only matter inside the app; an eventual extraction would need to address each of those
+separately, not just this one script.
 
 A `docs/chordpro-authoring.md` file, parallel to `docs/docx-authoring.md`, documenting the
 setlist dialect (§6), matching behaviour (§6.1), and configurable extensions (§4) for the
@@ -369,6 +382,29 @@ someone double-clicking it outside the app), it falls back to a plain
 `tests/test-chordpro-preview-redirect.mjs` (top-level `tests/`, not this plugin's own folder —
 the code under test is `ro-crate-html-output/index.js`, not anything in `chordpro-input/`).
 
+**Building a songbook without the app at all.** `build-songbook.mjs` is a standalone Node CLI
+that runs the same two steps a real app build does for chordpro mode — `buildCrateFromChordProFolder`
+then `renderSongbookHtml` — directly against a real folder on disk, with no browser, no File
+System Access API, and no resources2crate UI in between:
+
+```
+node src/plugins/chordpro-input/build-songbook.mjs <folder>
+npm run build:songbook -- <folder>
+```
+
+It wraps the folder in a small read-only stand-in for the File System Access API's own
+directory-handle shape (`values()` yielding `{kind, name, getFile()|values()}`) —
+`buildCrateFromChordProFolder` itself has no idea whether it's talking to a real browser handle
+or this Node-backed one — writes `ro-crate-metadata.json` (`crate.getJson()`, the same plain
+graph object a real build's `ro-crate-json-output` plugin serializes — this script doesn't
+import that plugin or `crate.js`'s own one-line `crateToJsonString` wrapper, for the
+self-containment reason in the script's own header comment, but produces byte-for-byte
+equivalent JSON), then `songbook.html`. Reports song/setlist counts and any unresolved/
+ambiguous setlist-entry matches (SPEC.md §6.1) to stdout, the same warnings `onProgress`
+already surfaces inside the app's own build log. Does not write `ro-crate-preview.html` — that
+redirect stub exists only for the app's own "Show" button (this section, above), which a
+headless CLI run has no equivalent of.
+
 **Embedding chordprobook.** `initSongbookApp` calls `ChordProSong`, `renderSong`,
 `Transposer`, and `ChordDiagram` as bare globals, since nothing can `import` anything once
 this is a classic script. Those globals, plus the two data constants above, are produced at
@@ -409,9 +445,9 @@ otherwise win on specificity while both apply):
 
 | View | Shown by | Contains |
 |---|---|---|
-| `#list-view` | `showList()` | all songs (searchable, scrollable), a "Print this songbook" button, a "Setlists" button (hidden if the crate has none) |
+| `#list-view` | `showList()` | all songs (searchable, scrollable), each with a composer/artist/subtitle credit line and key (§12), a "Print this songbook" button, a "Setlists" button (hidden if the crate has none) |
 | `#setlist-index-view` | `showSetlistIndex()` | every setlist by name |
-| `#setlist-view` | `showSetlist(index)` | one setlist's entries: position, heading, match-status badge, notes, print/notes-toggle controls |
+| `#setlist-view` | `showSetlist(index)` | one setlist's entries: position, heading, credit line and key (§12), match-status badge, notes, print/notes-toggle controls |
 | `#song-view` | `showSong(position)` | one song, with the sticky `#app-bar` (prev/next, fullscreen, instrument select, print, hide/show chords) and, inside `#song-content` itself, `#song-header` (title, key/capo — §12) |
 | `#print-view` | `enterPrintView()` | whatever's being printed (§12) |
 
@@ -530,21 +566,40 @@ the same idea as `fitTextToBox` but bounded by the *header's* leftover width (`#
 own width minus whichever of `#key-select`/`#capo-select` are visible, minus a gap per
 visible one) rather than the whole page.
 
-Its ceiling is normally 1.3x the body's own font-size — matching what a plain `font-size:
-1.3em` would give the title — but clamped to `TITLE_MIN_FONT_PX`..`TITLE_MAX_FONT_PX` (16–36px)
-regardless: a very short song can drive the body font-size all the way to `FIT_MAX_FONT_PX`
-(80px), and 1.3x *that* would make the title dominate the page — a lot of width in
-single-column layouts, and height eaten out of what `fitSongContent` measured as available
-for the lyrics themselves — so `TITLE_MAX_FONT_PX` caps it there instead. `TITLE_MIN_FONT_PX`
-is the same idea in the other direction: this same short-song effect also inflates key/capo's
-own em-based width (`#key-select`/`#capo-select`'s own CSS caps *that* growth at `1.25rem` for
-the same reason, though it doesn't eliminate it), which used to leave the title almost no
-header width and shrink it to near-nothing to compensate; below this floor it ellipsis-
-truncates instead (`#song-view-title`'s own `white-space`/`overflow`/`text-overflow`) — a
-readable-but-truncated title beats a technically-whole but microscopic one. `fitTextToBox`
-gained two more optional parameters for this, `maxFontPx`/`minFontPx` (defaulting to
-`FIT_MAX_FONT_PX`/`FIT_MIN_FONT_PX` for its two original call sites, so their behaviour is
-unchanged).
+Its search range is a flat `TITLE_MIN_FONT_PX`..`TITLE_MAX_FONT_PX` (16–36px), independent of
+the body's own font-size — not, as an earlier version tried, a ceiling *derived* from it
+(`min(TITLE_MAX_FONT_PX, max(TITLE_MIN_FONT_PX, bodyFontPx * 1.3))`, matching what a plain
+`font-size: 1.3em` would give the title). That formula was meant only to stop a very short
+song — whose body font-size can reach `FIT_MAX_FONT_PX` (80px) — from scaling the title up
+into dominating the page, but a flat `TITLE_MAX_FONT_PX` ceiling already fully covers that case
+on its own (`min(36, 80 * 1.3)` and a flat `36` are the same number), so the body-font term
+added no benefit — and cost a real bug: for any normal-to-long song, whose body text has to
+shrink well below `FIT_MAX_FONT_PX` to fit all its lyrics, `bodyFontPx * 1.3` could land
+*below* `TITLE_MIN_FONT_PX`, at which point `max(TITLE_MIN_FONT_PX, ...)` pulled the ceiling
+back up to exactly the floor — collapsing the search range to nothing and forcing the title to
+16px regardless of how much header width was actually free. That fired for any song whose
+*lyrics* needed a small font, which has nothing to do with whether the *title* had room — a
+long song with a perfectly ordinary amount of header space would render with a visibly tiny
+title next to a short song's much larger one, for no reason connected to the title's own fit.
+`TITLE_MIN_FONT_PX` is a readable floor for a different reason: a title that can't fit even
+this small, at the header's actual available width, ellipsis-truncates instead
+(`#song-view-title`'s own `white-space`/`overflow`/`text-overflow`) — a readable-but-truncated
+title beats a technically-whole but microscopic one. `fitTextToBox` gained two more optional
+parameters for this, `maxFontPx`/`minFontPx` (defaulting to `FIT_MAX_FONT_PX`/`FIT_MIN_FONT_PX`
+for its two original call sites, so their behaviour is unchanged).
+
+**`#key-select`/`#capo-select` are also capped at `max-width: 5.5rem` (with `overflow:
+hidden`/`text-overflow: ellipsis`)** — found via real (headless-Chrome) measurement, not the
+fake-DOM test suite, which can't observe a real `<select>`'s own rendered width at all: Chrome
+sizes a `<select>` by its *widest option*, not its currently-selected one.
+`populateCapoSelect`'s own `"N - (key shapes)"` labels (§12, above) run noticeably longer for
+any song with a real `{key}` — worse for a minor key, whose every option gets an extra
+trailing "m" — than a keyless song's plain `"Capo N"` fallback. That difference alone could
+reserve 50-90px more of `#song-header`'s width for a keyed song, at direct, otherwise-invisible
+cost to `fitSongHeaderTitle`'s own available width — a keyed song's title could end up
+noticeably smaller than a keyless one's for a reason with nothing to do with the title itself.
+Capped via CSS rather than by shortening the label text — which stays fully intact and
+readable in the open dropdown either way, only the *closed* box's width is bounded.
 
 > **Keep in sync by hand:** `fitSongHeaderTitle`'s `SONG_HEADER_GAP_EM` constant
 > (`songbook_html.js`, currently `0.6`) and `#song-header`'s own `gap: 0.6em` in the `<style>`
@@ -600,12 +655,34 @@ is the glyph's C striking through (a `.struck` class on `#toggle-chords-glyph`, 
 `chordsHidden`) rather than any text swap.
 
 **Song search.** `#song-search` filters `#song-list`'s rows by case-insensitive substring
-match. Implemented over `Array.from(songListElement.children)`, not `.children.forEach`
-directly — a real element's `.children` is a live `HTMLCollection`, which has no `.forEach`
-(unlike `NodeList`, which does); the test suite's own fake DOM models `.children` as a plain
-array, which does have one, so this exact mistake will pass every test here while doing
-nothing in a real browser. `#song-list`/`#setlist-list` are both capped to
-`max-height: 60vh` with their own scroll, rather than growing the whole page taller.
+match against the title *and* whatever `creditFor()` picked for that row's credit line (§12,
+below) — composer, else performer, else subtitle, matching what's actually visible, not all
+three independently regardless of which one a row displays. Implemented over
+`Array.from(songListElement.children)`, not `.children.forEach` directly — a real element's
+`.children` is a live `HTMLCollection`, which has no `.forEach` (unlike `NodeList`, which
+does); the test suite's own fake DOM models `.children` as a plain array, which does have one,
+so this exact mistake will pass every test here while doing nothing in a real browser.
+`#song-list`/`#setlist-list` are both capped to `max-height: 60vh` with their own scroll,
+rather than growing the whole page taller.
+
+**Credit line and key in list rows.** Both `#song-list` (`showList()`) and `#setlist-entries`
+(`renderSetlistEntries()`/`buildSetlistEntryRow()`) show, under each title, a single italic
+credit line — `composer`, else `performer` (a song's own `{artist}`), else `subtitle`
+(`{subtitle}`/`{st}`) — the first of those three the song actually has, never more than one at
+once. This is a *display* preference for one line under a title, unrelated to and no more
+authoritative than `chordpro_crate.js`'s own precedence for what a `{st:}` directive should be
+migrated *to* (SPEC.md §15) — a song can perfectly well carry both a `composer` and a
+`performer`, in which case only the composer shows here. The song's own `musicalKey` (`{key}`)
+is shown alongside it, not italicized. A song with none of `composer`/`performer`/`subtitle`,
+or no `{key}`, simply omits whichever part it has nothing for — nothing renders an empty
+credit line or a bare "Key:" label.
+
+A setlist entry (`buildSetlistEntryRow`) shows its *underlying song's* own credit/key this same
+way, resolved via `entry.songIndex` into the `songs` array built at the top of
+`initSongbookApp` — never anything of the entry's own, since an entry carries no
+composer/performer/subtitle/key of its own to begin with (only `transpose`/`capo` overrides
+and freeform notes — SPEC.md §6/§7). An unresolved entry (`entry.songIndex === -1`, no matching
+song at all) shows neither, for the same reason it has no name link to a song view either.
 
 ## 13. Songbook HTML output — print
 

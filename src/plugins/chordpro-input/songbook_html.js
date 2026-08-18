@@ -91,10 +91,60 @@ export function initSongbookApp(document, window) {
   const graph = Array.isArray(crate["@graph"]) ? crate["@graph"] : [];
   const asArray = (value) => (value === undefined || value === null ? [] : Array.isArray(value) ? value : [value]);
 
+  // composer/performer/subtitle/key: read via asArray()[0], same defensive
+  // habit as `name` just below — chordpro_crate.js itself only ever writes
+  // these as plain strings (SPEC.md §7), but nothing here can assume the
+  // `ro-crate` library never flattens a single value into a one-element
+  // array on its way through resolveContext()/getJson(). "" (not undefined)
+  // for a song with no such directive, so every consumer below can test
+  // truthiness directly rather than each needing its own `|| ""`.
   const songs = graph
     .filter((entity) => asArray(entity["@type"]).includes("MusicComposition") && "text" in entity)
-    .map((entity) => ({ id: entity["@id"], name: String(asArray(entity.name)[0] || entity["@id"]), text: entity.text }))
+    .map((entity) => ({
+      id: entity["@id"],
+      name: String(asArray(entity.name)[0] || entity["@id"]),
+      text: entity.text,
+      composer: String(asArray(entity.composer)[0] || ""),
+      performer: String(asArray(entity.performer)[0] || ""),
+      subtitle: String(asArray(entity.subtitle)[0] || ""),
+      key: String(asArray(entity.musicalKey)[0] || ""),
+    }))
     .sort((a, b) => a.name.localeCompare(b.name));
+
+  // The one credit shown under a title in a list row (SPEC.md §12) —
+  // composer preferred, then performer (a song's own {artist}), then
+  // subtitle, never more than one at once. A display preference only; a
+  // song can carry more than one of these fields at a time (unlike {st:},
+  // which chordpro_crate.js's own st_directive.js migrates to exactly one
+  // of artist/composer/both — that's a data-cleanup precedence, this is a
+  // separate, purely cosmetic one).
+  function creditFor(song) {
+    return song.composer || song.performer || song.subtitle || "";
+  }
+
+  // Appends the credit line + key (SPEC.md §12) to a list row that already
+  // has its title/name element — shared by the song list (below) and
+  // setlist entry rows (buildSetlistEntryRow), which show this the same
+  // way. `song` is null for a setlist entry with no matching song at all
+  // (SPEC.md §6.1's "unresolved" case) — silently does nothing then, the
+  // same as it does for a resolved song with neither a credit nor a key:
+  // never an empty <em> or a bare key label left in the row.
+  function appendListCredit(row, song) {
+    if (!song) return;
+    const credit = creditFor(song);
+    if (credit) {
+      const creditElement = document.createElement("em");
+      creditElement.className = "list-credit";
+      creditElement.textContent = credit;
+      row.appendChild(creditElement);
+    }
+    if (song.key) {
+      const keyElement = document.createElement("span");
+      keyElement.className = "list-key";
+      keyElement.textContent = song.key;
+      row.appendChild(keyElement);
+    }
+  }
 
   // Setlist-entry proxies (SPEC.md §7): MusicComposition entities with no
   // "text" of their own — the same test isCanonicalSong/the songs filter
@@ -150,6 +200,21 @@ export function initSongbookApp(document, window) {
   // extra CSS needed for that placement.
   const songContent = document.getElementById("song-content");
   const songHeader = document.getElementById("song-header");
+  // An off-flow clone used only to measure #song-view-title's own text at a
+  // candidate font-size — see fitSongHeaderTitle's own comment on why
+  // reading #song-view-title's own scrollWidth directly doesn't work.
+  // Appended as a child of #song-header so it inherits the exact same
+  // font-family #song-view-title does; position:absolute takes it out of
+  // the flex flow entirely, so it never affects #song-header's own layout.
+  const titleMeasurer = document.createElement("span");
+  // Not reachable via getElementById (it has no id) — findable in tests via
+  // #song-header's own children instead, by this class name.
+  titleMeasurer.className = "title-measurer";
+  titleMeasurer.style.position = "absolute";
+  titleMeasurer.style.visibility = "hidden";
+  titleMeasurer.style.whiteSpace = "nowrap";
+  titleMeasurer.style.fontWeight = "700"; // matches #song-view-title's own CSS
+  songHeader.appendChild(titleMeasurer);
   const songPagesElement = document.getElementById("song-pages");
   const songListElement = document.getElementById("song-list");
   const prevButton = document.getElementById("prev-song-button");
@@ -552,46 +617,54 @@ export function initSongbookApp(document, window) {
   // Keeps #song-view-title on the same line as #key-select/#capo-select
   // (SPEC.md §12) even when the title is long or the screen is narrow — the
   // same binary-search idea as fitTextToBox, but sized against the *header's*
-  // own leftover width rather than the whole page, and clamped to a
-  // TITLE_MIN_FONT_PX..TITLE_MAX_FONT_PX range regardless of how big or
-  // small the body's own font-size gets. Run after fitSongContent (which
-  // it's called from) has already settled #song-content's own font-size
-  // and, in turn, key/capo's em-based widths — this only ever shrinks the
-  // title to make room for whatever those two already are, never the other
-  // way around.
+  // own leftover width rather than the whole page, and clamped to a fixed
+  // TITLE_MIN_FONT_PX..TITLE_MAX_FONT_PX range. Run after fitSongContent
+  // (which it's called from) has already settled #song-content's own
+  // font-size and, in turn, key/capo's em-based widths — this only ever
+  // shrinks the title to make room for whatever those two already are,
+  // never the other way around.
   //
-  // TITLE_MIN_FONT_PX is a readable floor, well above FIT_MIN_FONT_PX: a
-  // very short song can drive the body font-size (and, with it, key/capo's
-  // em-based size — #key-select/#capo-select's own CSS caps that growth at
-  // 1.25rem for exactly this reason, but doesn't eliminate it) up quite far,
-  // which used to leave the title almost no room and shrink it to
-  // near-nothing to compensate. Below this floor it ellipsis-truncates
-  // instead (#song-view-title's own white-space/overflow/text-overflow) —
-  // a readable-but-truncated title beats a technically-whole but
-  // microscopic one.
+  // TITLE_MIN_FONT_PX is a readable floor: below it, the title ellipsis-
+  // truncates instead (#song-view-title's own white-space/overflow/
+  // text-overflow) — a readable-but-truncated title beats a technically-
+  // whole but microscopic one. TITLE_MAX_FONT_PX caps how big a title ever
+  // gets, full stop — including for a very short song, whose own body
+  // font-size can reach FIT_MAX_FONT_PX (80px); without an independent cap
+  // here, a title scaled proportionally to that (e.g. the CSS default,
+  // 1.3em) would dominate the page.
   //
-  // TITLE_MAX_FONT_PX is the same idea in the other direction: a *very*
-  // short song can drive the body font-size all the way to FIT_MAX_FONT_PX
-  // (80px), and 1.3x that would make the title dominate the page — a lot of
-  // width in single-column layouts, and a lot of height eaten out of what
-  // fitSongContent measured as available for the lyrics themselves (its
-  // own scrollHeight includes #song-header's, per this function's own
-  // header comment). The title should read as a heading, not compete with
-  // the song for space.
+  // Earlier versions of this instead computed a *body-font-derived* ceiling
+  // (`min(TITLE_MAX_FONT_PX, max(TITLE_MIN_FONT_PX, bodyFontPx * 1.3))`) —
+  // meant only to cap the oversized-title case above, but with a real bug:
+  // for any normal-to-long song, whose own body text has to shrink well
+  // below FIT_MAX_FONT_PX to fit all its lyrics, `bodyFontPx * 1.3` could
+  // fall *below* TITLE_MIN_FONT_PX — at which point `max(TITLE_MIN_FONT_PX,
+  // ...)` pulled the ceiling back up to exactly TITLE_MIN_FONT_PX, making it
+  // equal the floor. With ceiling == floor, fitTextToBox's own binary search
+  // has no range left to search at all, and — since its own `bestFit`
+  // starts at the floor and a search with high < low never updates it —
+  // silently forced the title to TITLE_MIN_FONT_PX (16px) regardless of how
+  // much header width was actually free. That's a title-size bug, not a
+  // does-it-fit one: it fired for any song whose *lyrics* needed a small
+  // font, which has nothing to do with whether the *title* had room. A flat
+  // TITLE_MAX_FONT_PX ceiling already fully covers the one case this was
+  // meant for (a very short song's blown-up body font) — `min(36, 80 * 1.3)`
+  // and a flat `36` land on exactly the same number — so the body-font term
+  // was pure liability with no corresponding benefit, and is gone.
   const TITLE_MIN_FONT_PX = 16;
   const TITLE_MAX_FONT_PX = 36;
-  // Keep in sync by hand with #song-header's own CSS: the 1.3 multiplier
-  // matches #song-view-title's `font-size: 1.3em`, and SONG_HEADER_GAP_EM
-  // matches #song-header's `gap: 0.6em` — both em-relative to #song-content,
-  // read here from songContent.style.fontSize (set moments ago by
-  // fitTextToBox, in the caller) rather than getComputedStyle(), which the
-  // test suite's fake DOM has no equivalent of and which a real browser
-  // would need a layout pass to resolve anyway.
+  // Keep in sync by hand with #song-header's own `gap: 0.6em` — this
+  // function has no way to read that value back out of the stylesheet (no
+  // getComputedStyle() — see fitSongHeaderTitle's own comment on why), so it
+  // keeps its own copy instead. Still read relative to bodyFontPx (not a
+  // fixed px value): the *gap itself* genuinely is meant to scale with the
+  // body's own font-size, unlike the title's own ceiling above — reserving
+  // the wrong width for it would misjudge how much room the title actually
+  // has to work with.
   const SONG_HEADER_GAP_EM = 0.6;
   function fitSongHeaderTitle() {
     if (isHidden(songViewTitle)) return;
     const bodyFontPx = parseFloat(songContent.style.fontSize) || FIT_MAX_FONT_PX;
-    const maxTitleFontPx = Math.min(TITLE_MAX_FONT_PX, Math.max(TITLE_MIN_FONT_PX, bodyFontPx * 1.3));
     const gapPx = bodyFontPx * SONG_HEADER_GAP_EM;
     let reservedWidth = 0;
     let visibleSiblings = 0;
@@ -599,10 +672,27 @@ export function initSongbookApp(document, window) {
     if (!isHidden(capoSelect)) { reservedWidth += capoSelect.offsetWidth; visibleSiblings += 1; }
     reservedWidth += gapPx * visibleSiblings; // one gap per sibling, between it and whatever precedes it
     const availableWidth = Math.max(0, songHeader.clientWidth - reservedWidth);
+    // Measured on titleMeasurer (an off-flow clone — see its own
+    // declaration comment), not #song-view-title itself: #song-view-title
+    // is a flex item with flex-grow:1 inside #song-header, so its own
+    // scrollWidth reflects whatever box width flexbox happens to allocate
+    // it — stretched to fill leftover header space when there's room,
+    // shrunk against key/capo's own fixed width when there isn't — which is
+    // *not* the same thing as how wide its text actually is at a given
+    // font-size. A short title (e.g. "Aeroplane") could easily get
+    // stretched to fill hundreds of pixels of leftover space yet still
+    // report a scrollWidth around that same size regardless of font-size,
+    // making the fits check meaningless and settling on an arbitrary result
+    // — reliably reproduced as a title stuck at TITLE_MIN_FONT_PX even with
+    // acres of free header width. titleMeasurer has no box of its own to be
+    // stretched or shrunk into, so its scrollWidth is governed purely by
+    // its text and font-size, the way fitTextToBox's binary search assumes.
     // Height never binds here — #song-view-title is white-space: nowrap
     // (its own CSS), so at any font size in range it's exactly one line
     // tall; this bound only has to be generously larger than that.
-    fitTextToBox(songViewTitle, FIT_MAX_FONT_PX * 4, availableWidth, maxTitleFontPx, TITLE_MIN_FONT_PX);
+    titleMeasurer.textContent = songViewTitle.textContent;
+    fitTextToBox(titleMeasurer, FIT_MAX_FONT_PX * 4, availableWidth, TITLE_MAX_FONT_PX, TITLE_MIN_FONT_PX);
+    songViewTitle.style.fontSize = titleMeasurer.style.fontSize;
   }
 
   function fitSongContent() {
@@ -1323,6 +1413,13 @@ export function initSongbookApp(document, window) {
       });
     }
     row.appendChild(nameElement);
+    // The underlying song's own credit/key (SPEC.md §12), never anything of
+    // the entry's own — an entry carries no composer/performer/subtitle/key
+    // itself, only transpose/capo overrides and freeform notes (§6/§7).
+    // null for an unresolved entry (entry.songIndex === -1), which
+    // appendListCredit treats the same as a resolved song with nothing to
+    // show: nothing rendered.
+    appendListCredit(row, entry.songIndex >= 0 ? songs[entry.songIndex] : null);
 
     // Directly actionable, not just descriptive: matchStatus/
     // matchCandidates are written at crate-build time (chordpro_crate.js)
@@ -1541,7 +1638,15 @@ export function initSongbookApp(document, window) {
     const item = document.createElement("li");
     const link = document.createElement("a");
     link.href = "#";
+    // Setting textContent first, then appendChild-ing credit/key after —
+    // not the other way around: textContent replaces all of an element's
+    // existing children with one text node, so anything appended afterward
+    // survives, but anything appended *before* would be wiped out.
     link.textContent = song.name;
+    // Credit/key live inside the link itself, not as siblings after it, so
+    // the whole row — not just the title text — is one clickable target and
+    // wraps together as a unit (see #song-list a's own flex-row CSS above).
+    appendListCredit(link, song);
     link.addEventListener("click", (event) => {
       event.preventDefault();
       showSong(index);
@@ -1560,10 +1665,17 @@ export function initSongbookApp(document, window) {
   // which does). This did nothing at all in a real browser as a result —
   // caught only by actually opening the page, since this file's own fake
   // DOM models .children as a plain array, which does have one.
+  // Matches against the same text the row actually shows (SPEC.md §12) —
+  // the title plus whichever one credit creditFor() picked, not all of
+  // composer/performer/subtitle independently: a song hidden behind its
+  // composer's name should be findable by typing that name, but there's no
+  // reason to also match a performer/subtitle the row never displays.
   songSearchInput.addEventListener("input", () => {
     const query = songSearchInput.value.trim().toLowerCase();
     Array.from(songListElement.children).forEach((item, index) => {
-      setHidden(item, query.length > 0 && !songs[index].name.toLowerCase().includes(query));
+      const song = songs[index];
+      const haystack = `${song.name} ${creditFor(song)}`.toLowerCase();
+      setHidden(item, query.length > 0 && !haystack.includes(query));
     });
   });
 
@@ -1958,6 +2070,15 @@ body {
   text-decoration: none;
 }
 #song-list a:hover, #setlist-list a:hover { text-decoration: underline; }
+/* #song-list's own rows carry a credit line + key alongside the title
+   (SPEC.md §12) — a flex row rather than plain block flow so the whole
+   thing (title, credit, key) wraps together as one clickable row on a
+   narrow screen, instead of the credit/key sitting outside the link. Not
+   applied to #setlist-list (the plain list of setlist *names*, which never
+   has a credit/key of its own). */
+#song-list a { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0.5rem; }
+.list-credit { font-style: italic; color: var(--muted); }
+.list-key { color: var(--muted); font-size: 0.85em; }
 
 /* Deliberately no max-width/centring here, unlike #list-view: the fitting
    algorithm in initSongbookApp (fitSongContent) sizes #song-content's own
@@ -2083,6 +2204,19 @@ body {
   border: 1px solid var(--ink);
   background: var(--bg);
   color: var(--ink);
+  /* A <select>'s own rendered width in Chrome is driven by its *widest*
+     option, not the currently-selected one — populateCapoSelect's own
+     "N - (key shapes)" labels (SPEC.md §12) can run to 15-17 characters for
+     a song with a real {key} (worse for a minor one: the trailing "m" adds
+     a character to every option), against as little as "Capo N" for a
+     keyless song. That difference alone can eat 50-90px more of
+     #song-header's width for no reason connected to the song itself, at
+     fitSongHeaderTitle's direct expense. Capped here rather than by
+     shortening the label text itself, which stays fully readable in the
+     open dropdown either way. */
+  max-width: 5.5rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* #print-song-button and #fullscreen-button both live in #app-bar now and

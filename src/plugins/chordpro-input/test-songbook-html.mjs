@@ -69,6 +69,39 @@ const FLAT_KEY_SONG = {
   text: "{title: Flat Key Song}\n{key: Eb}\n\n[Eb]Verse [Bb]line",
 };
 
+// Five songs covering every branch of the song-list/setlist-entry credit
+// line (SPEC.md §12): composer only, performer only, subtitle only, all
+// three at once (composer should still win, alone), and neither a credit
+// nor a key at all. Deliberately separate from CRATE_JSON/SETLIST_CRATE_JSON
+// above — those fixtures are reused by many unrelated assertions elsewhere
+// in this file, and adding credit/key fields to them would risk perturbing
+// tests that have nothing to do with this feature.
+const CREDIT_CRATE_JSON = {
+  "@graph": [
+    { "@id": "./", "@type": "Dataset", name: "Credits" },
+    {
+      "@id": "composer-only.cho.txt", "@type": "MusicComposition", name: "Composer Only",
+      text: "{title: Composer Only}\n\n[C]x", composer: "Hank Williams", musicalKey: "C",
+    },
+    {
+      "@id": "performer-only.cho.txt", "@type": "MusicComposition", name: "Performer Only",
+      text: "{title: Performer Only}\n\n[D]x", performer: "Richard Thompson",
+    },
+    {
+      "@id": "subtitle-only.cho.txt", "@type": "MusicComposition", name: "Subtitle Only",
+      text: "{title: Subtitle Only}\n\n[E]x", subtitle: "a lullaby",
+    },
+    {
+      "@id": "all-three.cho.txt", "@type": "MusicComposition", name: "All Three",
+      text: "{title: All Three}\n\n[F]x", composer: "Comp Erson", performer: "Perf Ormer", subtitle: "Sub Title",
+    },
+    {
+      "@id": "none.cho.txt", "@type": "MusicComposition", name: "No Credit No Key",
+      text: "{title: No Credit No Key}\n\n[G]x",
+    },
+  ],
+};
+
 // A setlist with one entry of each SPEC.md §6.1 match status (exact,
 // fuzzy — with its own capo override, ambiguous, unresolved), across two
 // sets, one entry carrying performance notes. Built directly as the crate
@@ -79,8 +112,14 @@ const FLAT_KEY_SONG = {
 const SETLIST_CRATE_JSON = {
   "@graph": [
     { "@id": "./", "@type": "Dataset", name: "Songbook" },
-    { "@id": "song-a.cho.txt", "@type": "MusicComposition", name: "Song A", text: "{title: Song A}\n{key: G}\n\n[G]Verse" },
-    { "@id": "song-b.cho.txt", "@type": "MusicComposition", name: "Song B", text: "{title: Song B}\n{key: C}\n\n[C]Verse" },
+    // musicalKey set explicitly (not just embedded in `text`), matching what
+    // chordpro_crate.js's own buildSongEntity actually writes alongside
+    // `text` for a song with a {key} directive (SPEC.md §5/§7) — this
+    // fixture's own header comment already claims to model that real output,
+    // and the setlist-entry credit/key test below (SPEC.md §12) is exactly
+    // what surfaced this field having been missing until now.
+    { "@id": "song-a.cho.txt", "@type": "MusicComposition", name: "Song A", text: "{title: Song A}\n{key: G}\n\n[G]Verse", musicalKey: "G" },
+    { "@id": "song-b.cho.txt", "@type": "MusicComposition", name: "Song B", text: "{title: Song B}\n{key: C}\n\n[C]Verse", musicalKey: "C" },
     {
       "@id": "gig.setlist.md", "@type": "MusicPlaylist", name: "Friday Gig",
       hasPart: [
@@ -375,6 +414,37 @@ function isHidden(element) {
   elements["song-search"].dispatch("input");
   assert.equal(isHidden(elements["song-list"].children[0]), false);
   assert.equal(isHidden(elements["song-list"].children[1]), false);
+}
+
+{
+  // Search also matches whichever credit a row actually displays (SPEC.md
+  // §12) — composer/performer/subtitle, not just the title. Rows, sorted
+  // alphabetically: All Three (composer "Comp Erson"), Composer Only
+  // ("Hank Williams"), No Credit No Key, Performer Only ("Richard
+  // Thompson"), Subtitle Only ("a lullaby").
+  const { doc, elements } = fakeDocument(CREDIT_CRATE_JSON);
+  initSongbookApp(doc, fakeWindow());
+  const rows = elements["song-list"].children;
+
+  elements["song-search"].value = "hank";
+  elements["song-search"].dispatch("input");
+  assert.deepEqual(rows.map(isHidden), [true, false, true, true, true]); // only Composer Only
+
+  elements["song-search"].value = "thompson";
+  elements["song-search"].dispatch("input");
+  assert.deepEqual(rows.map(isHidden), [true, true, true, false, true]); // only Performer Only
+
+  elements["song-search"].value = "lullaby";
+  elements["song-search"].dispatch("input");
+  assert.deepEqual(rows.map(isHidden), [true, true, true, true, false]); // only Subtitle Only
+
+  // "Perf Ormer" is All Three's own *performer* — not shown, since its
+  // composer ("Comp Erson") wins the one credit line that's actually
+  // displayed (SPEC.md §12's own composer/performer/subtitle precedence) —
+  // so it must not be searchable either.
+  elements["song-search"].value = "perf ormer";
+  elements["song-search"].dispatch("input");
+  assert.deepEqual(rows.map(isHidden), [true, true, true, true, true]); // matches nothing
 }
 
 /* ---------- clicking a song: song view, rendered via chordprobook's real renderSong ---------- */
@@ -1522,6 +1592,19 @@ function isFittedFontSize(value) {
 }
 
 /* ---------- fitSongHeaderTitle: keeps title/key/capo on one line (SPEC.md §12) ---------- */
+// These tests model titleMeasurer's own scrollWidth as scaling with its
+// font-size, which is what a *correct* measurement looks like — but this
+// fake DOM has no real flex/layout engine at all, so it was never capable of
+// reproducing the actual bug this file's own history is about: a real
+// browser's #song-view-title (a flex item with flex-grow:1) reports a
+// scrollWidth driven by flexbox's own box-width allocation, decoupled from
+// its font-size or text — found only via real (headless-Chrome)
+// measurement against real chart files, not this suite. That's why
+// fitSongHeaderTitle measures on an off-flow clone (titleMeasurer) instead
+// of #song-view-title itself; these tests check the resulting arithmetic is
+// correct given a trustworthy width signal, not that #song-view-title's own
+// scrollWidth would have been trustworthy — it isn't, which is the whole
+// point of not reading it directly.
 
 {
   // A very short song drives the body font-size all the way to its own
@@ -1538,10 +1621,15 @@ function isFittedFontSize(value) {
   Object.defineProperty(content, "scrollWidth", { get() { return (parseInt(content.style.fontSize) || 0) * 3; } });
   elements["app-bar"].offsetHeight = 60;
   header.clientWidth = 2000;
-  Object.defineProperty(title, "scrollWidth", { get() { return (parseInt(title.style.fontSize) || 0) * 5; } });
 
   const win = fakeWindow({ innerHeight: 800 }); // body settles at 80px (see fitSongContent tests)
   initSongbookApp(doc, win);
+  // titleMeasurer only exists once initSongbookApp has run — see
+  // fitSongHeaderTitle's own comment on why the *title element's* own
+  // scrollWidth isn't what's measured (it's a flex item; its scrollWidth
+  // reflects flexbox's own box-width allocation, not its text).
+  const measurer = header.children.find((c) => c.className === "title-measurer");
+  Object.defineProperty(measurer, "scrollWidth", { get() { return (parseInt(measurer.style.fontSize) || 0) * 5; } });
   songLink(elements, 0).click(); // Amazing Grace — has chords, so key/capo are shown
 
   assert.equal(content.style.fontSize, "80px");
@@ -1549,12 +1637,50 @@ function isFittedFontSize(value) {
 }
 
 {
-  // A more modest body font-size (20px, well under the point where
-  // TITLE_MAX_FONT_PX would bind — 1.3x that is 26, already below the 36
-  // cap) and a header too narrow for the title at that size once key/capo's
-  // own reserved width is taken into account: the title has to shrink below
-  // its own proportional ceiling to keep all three on one line, landing on
-  // a real binary-search result (20px) rather than either boundary.
+  // The bug this function's own comment documents: a *long* song (lots of
+  // lyrics, forcing the body font-size all the way down to FIT_MIN_FONT_PX,
+  // 10px here) used to collapse the title's own ceiling to exactly
+  // TITLE_MIN_FONT_PX too (`min(36, max(16, 10 * 1.3=13))` = 16, since
+  // `max(16, 13)` pulls it back up to the floor) — forcing a tiny title even
+  // with a huge, mostly-empty header (2000px here) that had plenty of room
+  // for a much bigger one. The fix: the title's own ceiling is now a flat
+  // TITLE_MAX_FONT_PX regardless of the body's own font-size, so with this
+  // much header width free, it settles at the real ceiling (36px), not the
+  // floor.
+  const { doc, elements } = fakeDocument(CRATE_JSON);
+  const content = elements["song-content"];
+  const title = elements["song-view-title"];
+  const header = elements["song-header"];
+  const keySelect = elements["key-select"];
+  const capoSelect = elements["capo-select"];
+  content.clientWidth = 1000;
+  // A huge multiplier stands in for "lots of lyrics text" — even at
+  // FIT_MIN_FONT_PX (10px) this still exceeds any reasonable available
+  // height, so the body's own binary search settles at the floor.
+  Object.defineProperty(content, "scrollHeight", { get() { return (parseInt(content.style.fontSize) || 0) * 1000; } });
+  Object.defineProperty(content, "scrollWidth", { get() { return (parseInt(content.style.fontSize) || 0) * 3; } });
+  elements["app-bar"].offsetHeight = 60;
+  header.clientWidth = 2000;
+  keySelect.offsetWidth = 30;
+  capoSelect.offsetWidth = 25;
+
+  const win = fakeWindow({ innerHeight: 800 });
+  initSongbookApp(doc, win);
+  const measurer = header.children.find((c) => c.className === "title-measurer");
+  Object.defineProperty(measurer, "scrollWidth", { get() { return (parseInt(measurer.style.fontSize) || 0) * 4; } });
+  songLink(elements, 0).click();
+
+  assert.equal(content.style.fontSize, "10px"); // FIT_MIN_FONT_PX
+  assert.equal(title.style.fontSize, "36px"); // TITLE_MAX_FONT_PX — not 16, the old bug's result
+}
+
+{
+  // A more modest body font-size (20px) and a header too narrow for the
+  // title at that size once key/capo's own reserved width is taken into
+  // account: the title has to shrink to keep all three on one line, landing
+  // on a real binary-search result (20px, well within TITLE_MIN_FONT_PX..
+  // TITLE_MAX_FONT_PX) rather than either boundary — a case where *width*,
+  // not the ceiling, is what actually binds.
   const { doc, elements } = fakeDocument(CRATE_JSON);
   const content = elements["song-content"];
   const title = elements["song-view-title"];
@@ -1568,16 +1694,18 @@ function isFittedFontSize(value) {
   header.clientWidth = 160;
   keySelect.offsetWidth = 30;
   capoSelect.offsetWidth = 25;
-  Object.defineProperty(title, "scrollWidth", { get() { return (parseInt(title.style.fontSize) || 0) * 4; } });
 
   const win = fakeWindow({ innerHeight: 800 }); // 20 * 40 = 800 <= 800; 21 * 40 = 840 > 800
   initSongbookApp(doc, win);
+  const measurer = header.children.find((c) => c.className === "title-measurer");
+  Object.defineProperty(measurer, "scrollWidth", { get() { return (parseInt(measurer.style.fontSize) || 0) * 4; } });
   songLink(elements, 0).click();
   assert.equal(content.style.fontSize, "20px");
 
-  // ceiling = min(36, max(16, 20 * 1.3)) = 26; reserved = 30 + 25 +
-  // (20 * 0.6) * 2 = 79; available = 160 - 79 = 81. Largest fontPx (16..26)
-  // with fontPx * 4 <= 81 is 20 (80 <= 81, 84 > 81).
+  // ceiling is the flat TITLE_MAX_FONT_PX (36); reserved = 30 + 25 +
+  // (20 * 0.6) * 2 = 79; available = 160 - 79 = 81. Largest fontPx (16..36)
+  // with fontPx * 4 <= 81 is 20 (80 <= 81, 84 > 81) — width binds well
+  // before the ceiling would.
   assert.equal(title.style.fontSize, "20px");
 }
 
@@ -1600,13 +1728,44 @@ function isFittedFontSize(value) {
   header.clientWidth = 50; // already less than key/capo's own reserved width
   keySelect.offsetWidth = 60;
   capoSelect.offsetWidth = 50;
-  Object.defineProperty(title, "scrollWidth", { get() { return (parseInt(title.style.fontSize) || 0) * 4; } });
 
   const win = fakeWindow({ innerHeight: 800 });
   initSongbookApp(doc, win);
+  const measurer = header.children.find((c) => c.className === "title-measurer");
+  Object.defineProperty(measurer, "scrollWidth", { get() { return (parseInt(measurer.style.fontSize) || 0) * 4; } });
   songLink(elements, 0).click();
 
   assert.equal(title.style.fontSize, "16px"); // TITLE_MIN_FONT_PX, not lower
+}
+
+{
+  // Song-list rows: a composer/performer/subtitle credit line — composer
+  // preferred, then performer, then subtitle, never more than one at once —
+  // plus the song's own key, both omitted entirely when a song has neither
+  // (SPEC.md §12's "Credit line and key in list rows"). Both live inside the
+  // row's own <a> (appendListCredit), so the whole row stays one clickable
+  // target — checked by class name, not position, since which of
+  // credit/key a given song has varies.
+  const { doc, elements } = fakeDocument(CREDIT_CRATE_JSON);
+  initSongbookApp(doc, fakeWindow());
+
+  // Sorted alphabetically by name: All Three, Composer Only, No Credit No
+  // Key, Performer Only, Subtitle Only.
+  const rows = elements["song-list"].children;
+  assert.equal(rows.length, 5);
+
+  function creditAndKey(row) {
+    const link = row.children[0];
+    const credit = link.children.find((c) => c.className === "list-credit");
+    const key = link.children.find((c) => c.className === "list-key");
+    return { credit: credit ? credit.textContent : null, key: key ? key.textContent : null };
+  }
+
+  assert.deepEqual(creditAndKey(rows[0]), { credit: "Comp Erson", key: null }); // All Three — composer wins over performer/subtitle
+  assert.deepEqual(creditAndKey(rows[1]), { credit: "Hank Williams", key: "C" }); // Composer Only
+  assert.deepEqual(creditAndKey(rows[2]), { credit: null, key: null }); // No Credit No Key
+  assert.deepEqual(creditAndKey(rows[3]), { credit: "Richard Thompson", key: null }); // Performer Only
+  assert.deepEqual(creditAndKey(rows[4]), { credit: "a lullaby", key: null }); // Subtitle Only
 }
 
 /* ---------- setlists: display and print (SPEC.md §6) — no editing/creation yet ---------- */
@@ -1641,11 +1800,16 @@ function isFittedFontSize(value) {
   assert.equal(isHidden(elements["setlist-view"]), false);
   assert.equal(elements["setlist-view-title"].textContent, "Friday Gig");
 
-  // Set 1 heading, entry 1 (exact — no status badge, no notes), entry 2
-  // (fuzzy — status badge + notes), Set 2 heading, entry 3 (ambiguous —
-  // still a link, since matchEntryToSong resolves it to a first-candidate
-  // song even though it isn't a clean match), entry 4 (unresolved — no
-  // song to link to, plain text).
+  // Set 1 heading, entry 1 (exact — key only, no status badge, no notes),
+  // entry 2 (fuzzy — key, status badge, and notes), Set 2 heading, entry 3
+  // (ambiguous — still a link and still shows a key, since matchEntryToSong
+  // resolves it to a first-candidate song even though it isn't a clean
+  // match), entry 4 (unresolved — no song to link to or pull a key from,
+  // plain text). Neither song-a.cho.txt nor song-b.cho.txt has a
+  // composer/performer/subtitle of its own (SETLIST_CRATE_JSON), so every
+  // resolved entry's own credit line (SPEC.md §12) is absent here — that's
+  // covered on its own, independent of setlists entirely, by the
+  // CREDIT_CRATE_JSON test above.
   const rows = elements["setlist-entries"].children;
   assert.equal(rows.length, 6);
 
@@ -1653,27 +1817,31 @@ function isFittedFontSize(value) {
   assert.equal(rows[0].textContent, "Set 1");
 
   const entry1 = rows[1];
-  assert.equal(entry1.children.length, 2); // position, name — no status, no notes
+  assert.equal(entry1.children.length, 3); // position, name, key — no status, no notes
   assert.equal(entry1.children[1].textContent, "Song A");
   assert.equal(entry1.children[1].href, "#"); // a real link — entry.songIndex >= 0
+  assert.equal(entry1.children[2].className, "list-key");
+  assert.equal(entry1.children[2].textContent, "G"); // song-a.cho.txt's own {key}
 
   const entry2 = rows[2];
-  assert.equal(entry2.children.length, 4); // position, name, status, notes
+  assert.equal(entry2.children.length, 5); // position, name, key, status, notes
   assert.equal(entry2.children[1].textContent, "Song B (capo 2)");
-  assert.ok(entry2.children[2].textContent.includes("matched approximately"));
-  assert.equal(entry2.children[3].textContent, "Play slow and quiet");
-  assert.equal(isHidden(entry2.children[3]), false); // notesVisible starts true
+  assert.equal(entry2.children[2].textContent, "C"); // song-b.cho.txt's own {key} — not the entry's capo:2 override
+  assert.ok(entry2.children[3].textContent.includes("matched approximately"));
+  assert.equal(entry2.children[4].textContent, "Play slow and quiet");
+  assert.equal(isHidden(entry2.children[4]), false); // notesVisible starts true
 
   assert.equal(rows[3].className, "setlist-set-name");
   assert.equal(rows[3].textContent, "Set 2");
 
   const entry3 = rows[4];
-  assert.equal(entry3.children.length, 3); // position, name (still a link), status
+  assert.equal(entry3.children.length, 4); // position, name (still a link), key, status
   assert.ok(entry3.children[1].href !== undefined); // <a>, not <span> — songIndex >= 0
-  assert.ok(entry3.children[2].textContent.includes("matches more than one song"));
+  assert.equal(entry3.children[2].textContent, "G"); // resolved to song-a.cho.txt, same as entry 1
+  assert.ok(entry3.children[3].textContent.includes("matches more than one song"));
 
   const entry4 = rows[5];
-  assert.equal(entry4.children.length, 3); // position, name (plain, no song to link to), status
+  assert.equal(entry4.children.length, 3); // position, name (plain, no song to link to), status — no key
   assert.equal(entry4.children[1].href, undefined); // <span> — songIndex === -1
   assert.ok(entry4.children[2].textContent.includes("no matching song found"));
 }
@@ -1773,11 +1941,13 @@ function isFittedFontSize(value) {
 
   elements["toggle-notes-button"].click();
   assert.equal(elements["toggle-notes-button"].textContent, "Show notes");
-  assert.equal(isHidden(elements["setlist-entries"].children[2].children[3]), true);
+  // children[4]: position, name, key, status, notes (entry 2's own key —
+  // SPEC.md §12 — pushes notes one slot later than it would sit without it).
+  assert.equal(isHidden(elements["setlist-entries"].children[2].children[4]), true);
 
   elements["toggle-notes-button"].click();
   assert.equal(elements["toggle-notes-button"].textContent, "Hide notes");
-  assert.equal(isHidden(elements["setlist-entries"].children[2].children[3]), false);
+  assert.equal(isHidden(elements["setlist-entries"].children[2].children[4]), false);
 }
 
 {
