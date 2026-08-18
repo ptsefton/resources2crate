@@ -17,7 +17,8 @@
     "test:default-profile": "node tests/test-default-profile.mjs",
     "update:austlang": "node scripts/update-austlang-data.mjs",
     "generate:chordprobook-bundle": "node scripts/bundle-chordprobook-for-browser.mjs",
-    "fix:st-directive": "node scripts/fix-st-directive.mjs"
+    "fix:st-directive": "node scripts/fix-st-directive.mjs",
+    "build:songbook": "node src/plugins/chordpro-input/build-songbook.mjs"
   },
   "dependencies": {
     "cheerio": "^1.0.0",
