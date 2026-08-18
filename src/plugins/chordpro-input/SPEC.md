@@ -13,7 +13,14 @@ It has three Stages:
   folder — it never writes back to it, edits songs, transposes chords, or draws chord
   diagrams.
 
--  **Metadata entry** and cleanup -- TODO
+- **Metadata entry and cleanup** (`fix_st_directive_ui.js`, `st_directive.js`,
+  `scripts/fix-st-directive.mjs`): a standalone tool, wired directly into the app's UI rather
+  than through this plugin's own `HOOKS` taps, for fixing up old charts whose metadata
+  predates this project's own `{artist}`/`{subtitle}` split (§5) — specifically, `{st: ...}`
+  used as a stand-in for a performer or composer credit. Unlike Harvesting and Songbook
+  rendering, this stage **can** write back into the picked folder: it rewrites `{st:}`
+  directives to `{artist:}`/`{composer:}` under a human's own per-occurrence choice, after
+  first backing up the affected files to a zip kept inside the folder itself. See §15.
 
 - **Songbook rendering** (`songbook_html.js`): reads the RO-Crate this half of the plugin
   just wrote and produces `songbook.html`, a single file containing the crate's own data
@@ -21,7 +28,7 @@ It has three Stages:
   transposition and chord diagrams, setlists, and a print mode. This file is meant to be
   opened directly (including as a `file://` URL) with no server and no build step.
 
-The first and last stages depend on [`chordprobook`](https://github.com/ptsefton/chordprobook) (a sibling
+The three stages depend on [`chordprobook`](https://github.com/ptsefton/chordprobook) (a sibling
 repository, `"chordprobook": "file:../chordprobook"` in `package.json`) for ChordPro/setlist
 parsing, chord transposition, and chord-diagram rendering.
 
@@ -38,7 +45,11 @@ parsing, chord transposition, and chord-diagram rendering.
   setlists, key/capo/instrument controls, chord diagrams, print mode.
 
 **Out of scope (permanent, not deferred):**
-- Editing songs or setlists, or writing back to the source folder.
+- Editing songs or setlists, or writing back to the source folder — true of Harvesting and
+  Songbook rendering (§1), which never do either. The one deliberate exception is the
+  `{st:}` cleanup tool (§1, §15), a standalone action outside
+  `runPipeline()`/`processFolder()` entirely, authorised specifically for that narrow
+  purpose.
 - Bundling any default chord-shape data or `{define:}` directives from a song's own text —
   chord shapes shown on screen or in print come only from chordprobook's own bundled data
   (§7).
@@ -98,10 +109,11 @@ Only metadata extraction happens here — no rendering, transposition, or chord-
 | Directive(s) | Extracted as |
 |---|---|
 | `{title}` / `{t}` | `name` |
-| `{subtitle}` / `{artist}` / `{st}` | `custom:artist` |
+| `{artist}` | `performer` |
+| `{subtitle}` / `{st}` | `subtitle` |
 | `{key}` | `musicalKey` |
-| `{capo}` | `custom:capo` (integer) |
-| `{transpose}` / `{tr}` | `custom:transpose` |
+| `{capo}` | `custom:capo` (string containing an integer) |
+| `{transpose}` / `{tr}` | `custom:transpose` (string — either a signed integer or a key name, e.g. `Em`) |
 | `{composer}` | `composer` |
 | everything else | retained as part of raw text, not extracted |
 
@@ -109,13 +121,12 @@ Every directive is first-wins (the first occurrence in the file is kept; later r
 the same directive are ignored).
 
 - **Raw text.** The file's original text, unmodified, is stored verbatim as `text` on the
-  Song entity. **The Song entity is the only place this text is ever written** — a setlist
-  entry naming the same song (§6) never carries its own copy.
-- **No file payload.** The source file's bytes are not copied into the crate; the Song
-  entity carries its content as data (`text`) only.
+  Song entity — so the crate can function without file access, independent of the metadata
+  extracted from it above. **The Song entity is the only place this text is ever written** —
+  a setlist entry naming the same song (§6) never carries its own copy.
 - **Identity.** `@id` is the file's path relative to the picked folder.
 - **Title fallback.** A file with no `{title}` directive falls back to its filename, minus
-  extension.
+  extension with s/_/ /g.
 
 ## 6. Parsing a setlist file
 
@@ -182,8 +193,22 @@ a Setlist is typed `MusicPlaylist`.
   "name": "Amazing Grace",
   "text": "{title: Amazing Grace}\n{key: G}\n\nA-[G]maz-ing [G7]Grace, ...",
   "musicalKey": "G"
-  // composer / custom:artist / custom:capo / custom:transpose are omitted entirely when
-  // the source file had no matching directive — never written as null or empty.
+  // composer / performer / subtitle / custom:capo / custom:transpose are omitted entirely
+  // when the source file had no matching directive — never written as null or empty.
+}
+```
+
+```jsonc
+{
+  "@id": "i_called_your_name.cho.txt",
+  "@type": "MusicComposition",
+  "name": "I Called Your name",
+  "text": "{title: I Called Your name}\n{st: Peter Sefton}\n...",
+  "musicalKey": "C",
+  "subtitle": "Peter Sefton",
+  // {capo: 2} would appear as "custom:capo": "2" — a string, like every other
+  // extracted directive here, not the JS number ChordProSong itself parses it into.
+  "custom:transpose": "+7"
 }
 ```
 
@@ -216,11 +241,12 @@ a Setlist is typed `MusicPlaylist`.
 | a song's full source text | `text` | standard (`CreativeWork`) |
 | a song's key | `musicalKey` | standard (`MusicComposition`) |
 | a song's composer credit | `composer` | standard (`MusicComposition`) — a bare string, not a Person/Organization reference |
+| a song's `{artist}` credit | `performer` | standard (`MusicComposition`/`Event`) — a bare string, not a Person/Organization reference, same simplification as `composer` |
+| a song's `{subtitle}`/`{st}` | `subtitle` | standard (`CreativeWork`) |
 | a setlist's ordered entries | `hasPart` | standard (`CreativeWork`) |
 | an entry's link to the song it performs | `specializationOf` | standard (`CreativeWork`) |
 | an entry's performance notes | `description` | standard (`Thing`) |
-| performer/attribution credit | `custom:artist` | custom |
-| capo position | `custom:capo` | custom |
+| capo position | `custom:capo` | custom — a string containing an integer on a Song entity (a song's own `{capo}`, SPEC.md §5); a JS number on a setlist entry (an inline `{capo: N}` override, parsed independently by `Setlist.js`, SPEC.md §6) — the one property in this crate whose type depends on which kind of entity carries it |
 | transpose value | `custom:transpose` | custom |
 | which set/section an entry belongs to | `custom:setName` | custom |
 | this plugin's confidence in a match | `custom:matchStatus` | custom |
@@ -233,13 +259,13 @@ uses them:
 |---|---|
 | `arcp://name,custom/terms#capo` | Capo |
 | `arcp://name,custom/terms#transpose` | Transpose |
-| `arcp://name,custom/terms#artist` | Artist |
 | `arcp://name,custom/terms#setName` | Set Name |
 | `arcp://name,custom/terms#matchStatus` | Match Status |
 | `arcp://name,custom/terms#matchCandidates` | Match Candidates |
 
-(`name`, `text`, `musicalKey`, `composer`, `hasPart`, `specializationOf`, `description` are
-standard schema.org properties already defined by every profile's base context.)
+(`name`, `text`, `musicalKey`, `composer`, `performer`, `subtitle`, `hasPart`,
+`specializationOf`, `description` are standard schema.org properties already defined by every
+profile's base context — none of them gets an entry in the table above.)
 
 ## 8. File layout
 
@@ -262,6 +288,9 @@ src/plugins/chordpro-input/
   test-chordpro-crate.mjs      integration test for chordpro_crate.js against samples/
   test-crate-index.mjs         unit tests for crate_index.js
   test-songbook-html.mjs       unit/integration tests for songbook_html.js
+  st_directive.js              isomorphic {st:} match/rewrite core — see §15
+  fix_st_directive_ui.js       browser-only shell (folder walk, zip backup, write-back) — see §15
+  test-st-directive.mjs        unit tests for st_directive.js
 ```
 
 `chordprobook` is dynamically imported from `buildCrate` (via `chordpro_crate.js`, itself
@@ -293,11 +322,9 @@ person writing song/setlist files, has not yet been written.
    of how files are organised on disk.
 2. Whether archival fidelity — retaining byte-identical original files, not just their
    parsed text — is required, given the crate currently stores only parsed text.
-3. First-wins-for-every-directive (§5) has not been checked against a real song library
-   that might depend on chordprosite's own accumulate-title behaviour.
-4. Duplicate or near-duplicate song titles from different files are not deduplicated or
+3. Duplicate or near-duplicate song titles from different files are not deduplicated or
    cross-referenced in any way; they simply coexist as unrelated entities.
-5. No MASP profile currently selects `inputMode: "chordpro"` (§3), so an end-to-end build
+4. No MASP profile currently selects `inputMode: "chordpro"` (§3), so an end-to-end build
    requires manual configuration in Settings.
 
 ---
@@ -742,3 +769,75 @@ anywhere on the page. Song text is serif; UI chrome (buttons, the menu bar) is a
 
 **Not yet built:** a hide-chords toggle, Nashville-number display, or any further style
 controls beyond what's listed in §12.
+
+## 15. Metadata entry and cleanup — the `{st:}` cleanup tool
+
+PT's own ChordPro chart collection goes back to around 2015, predating this project's own
+`{artist}`/`{subtitle}` split (§5): a lot of charts use `{st: ...}` where the value is
+actually a performer or composer credit, not a genuine subtitle. This tool finds those
+occurrences and rewrites them under a human's own per-occurrence choice — it never guesses.
+
+**Not a `HOOKS`-based plugin tap.** Every other stage of this plugin runs inside
+`runPipeline()`/`processFolder()` (§3), triggered by a build. This tool is a standalone
+action wired directly into `main.js`/`index.html` — a `#fixStBtn` button in the app's
+folder-scoped `#contextBar`, alongside Show/Edit/Build, enabled whenever a folder is picked
+regardless of input mode or whether a crate has ever been built. It runs independently of the
+crate-building pipeline entirely.
+
+**Shared, isomorphic core.** `st_directive.js` is pure string-in/string-out logic — no file
+I/O — the same isomorphic split `crate.js`'s own header comment describes for a different
+reason, and reused as-is by both `scripts/fix-st-directive.mjs` (the original, Node CLI
+version of this tool, run by hand against a real chart collection) and
+`fix_st_directive_ui.js` (the browser shell below), so the actual `{st:}`-matching and
+rewrite rules exist exactly once. It exports:
+- `ST_DIRECTIVE_RE` — matches `{st: value}` (whitespace-tolerant, case-insensitive on `st`
+  itself), deliberately not matching `{subtitle:}`/`{artist:}` (already-correct directives)
+  or `{start_of_chorus:}`/`{stanza:}` (the colon has to immediately follow `st`).
+- `findMatches(text)` — every occurrence in one file's text, in document order, as
+  `{ value, matchText, index }`.
+- `applyChoices(text, choices)` — `choices[i]` is the choice for the *i*-th match
+  `findMatches()` would return, in that same order: `"artist"` (default, `{st:}` becomes
+  `{artist:}`), `"composer"` (replaces the line with `{composer:}` instead — it was never a
+  performer credit), `"both"` (keeps the renamed `{artist:}` line and adds a *second*, new
+  `{composer:}` line after it), or `"skip"` (the original `{st:}` line is left untouched).
+
+Both functions defensively reset `ST_DIRECTIVE_RE.lastIndex = 0` before scanning:
+`String.prototype.matchAll` on a shared, mutable, global (`/gi`) regex inherits whatever
+`lastIndex` the regex object was last left at rather than always starting from 0 — a real
+correctness hazard for an exported, reusable regex — even though `String.prototype.replace`
+happens to reset it internally regardless.
+
+**The CLI script's own interactive UX is unchanged by sharing this module.** `scripts/fix-
+st-directive.mjs` still does its own thing end to end: list every hit numbered, ask which
+numbers should *also* get a `{composer:}` line (its `doubleUpNumbers` set becomes a
+per-file `choices` array of mostly `"artist"`, `"both"` for the flagged ones), confirm, zip
+the affected files, rewrite. `"composer"`-only and `"skip"` are choices the shared module
+supports but the CLI's own prompt never offers — nothing about the CLI's UX asked for them.
+
+**The browser UI (`fix_st_directive_ui.js`)** owns the one File System Access API walk this
+tool needs, independent of `chordpro_crate.js`'s own (reusing its exported
+`DEFAULT_SONG_EXTENSIONS` so both walks agree on what counts as a song file):
+- `findStDirectiveHits(dirHandle)` — walks the folder, returning one flat, globally-numbered
+  list of hits (`{ number, relativePath, lineNumber, value, matchText }`) across every song
+  file, in a stable sorted-file order and each file's own document order.
+- `applyStDirectiveFixes(dirHandle, hits, choicesByNumber)` — re-reads each affected file
+  fresh off disk (not trusting whatever `findStDirectiveHits()` saw, which may be from
+  moments earlier), zips the original text of every affected file — not every file scanned,
+  which would bulk out the backup with files that have nothing to do with this cleanup —
+  writes that zip to `.chordpro-cleanup-backups/<timestamp>.zip` *inside* the picked folder
+  via `writeFileAtPath` (`fs_helpers.js`, which creates intermediate directories as needed),
+  then rewrites each affected file in place via `applyChoices`.
+
+**Why the backup stays out of a crate build with no new code.** A dot-prefixed folder is
+already invisible to every folder walk in this codebase — `chordpro_crate.js`'s own
+`isIgnoredName` and `main.js`'s `walkDirectory` both unconditionally skip anything starting
+with `.` — so `.chordpro-cleanup-backups/` needs no entry in `GENERATED_FILENAMES`/
+`CONTROL_FILENAMES` (`crate.js`) to stay out of the crate this plugin builds.
+
+**The UI itself**: clicking `#fixStBtn` scans the current folder; if there are no hits, a
+one-line "nothing to fix" message goes to the build log instead of opening anything.
+Otherwise `#fixStDirectiveModal` lists every hit (file path, line, matched value) each with a
+`<select>` — Artist / Composer / Both / Leave as `{st:}` — defaulting to Artist, styled like
+the app's other row-based modals (`#collectionLabelsModal`, `#mergeMappingModal`). Applying
+reads every row's choice, calls `applyStDirectiveFixes`, and logs a result summary (files
+changed, occurrences, backup path) the same way the Build view logs its own results.

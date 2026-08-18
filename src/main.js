@@ -20,6 +20,7 @@ import { registerAllPlugins, composeOptionSchema, composeSettingsSchema } from "
 import { runPipeline } from "./plugins/pipeline.js";
 import { resetUploadedConfigDirHandle } from "./plugins/ro-crate-html-output/index.js";
 import { readXlsxHeaders, readXlsxContextPrefixes } from "./plugins/merge/xlsx.js";
+import { findStDirectiveHits, applyStDirectiveFixes } from "./plugins/chordpro-input/fix_st_directive_ui.js";
 
 // The hook bus is created once and plugins registered once — all
 // build-specific state lives in the fresh ctx object passed to emit() on
@@ -339,6 +340,7 @@ function showView(name) {
   $("showBtn").classList.toggle("hidden", !(name === "view-build" || name === "view-edit"));
   $("editBtn").classList.toggle("hidden", !(name === "view-build" || name === "view-show"));
   $("rebuildBtn").classList.toggle("hidden", !(name === "view-show" || name === "view-edit"));
+  $("fixStBtn").classList.toggle("hidden", !(name === "view-build" || name === "view-show" || name === "view-edit"));
 }
 
 /* ---------- options form ---------- */
@@ -1178,6 +1180,99 @@ function applyCollectionLabels() {
   collectionOrderOverride = order.length ? order : null;
   updateCollectionLabelsStatus(Object.keys(labels).length);
   $("collectionLabelsModal").classList.add("hidden");
+}
+
+/* ---------- {st:} cleanup modal ---------- */
+// The current folder's {st:} hits, kept alive between render and Apply so
+// applyStDirectiveFixes() doesn't need the DOM to reconstruct them.
+let fixStDirectiveHits = [];
+
+async function openFixStDirectiveModal() {
+  if (!dirHandle) return;
+  if (!(await verifyPermission(dirHandle, true))) {
+    alert("Permission to read/write the folder was denied.");
+    return;
+  }
+  let hits;
+  try {
+    hits = await findStDirectiveHits(dirHandle);
+  } catch (e) {
+    alert("Could not scan the folder for {st:} directives: " + (e && e.message ? e.message : e));
+    return;
+  }
+  fixStDirectiveHits = hits;
+  if (!hits.length) {
+    log(`No {st:} directives found in ${dirHandle.name}.`, "info");
+    return;
+  }
+  renderFixStDirectiveRows(hits);
+  $("fixStDirectiveModal").classList.remove("hidden");
+}
+
+function renderFixStDirectiveRows(hits) {
+  const container = $("fixStDirectiveBody");
+  container.innerHTML = "";
+
+  const head = document.createElement("div");
+  head.className = "mapping-head";
+  head.innerHTML = "<span>File</span><span>{st:} value</span><span>Becomes</span>";
+  container.appendChild(head);
+
+  hits.forEach((hit) => {
+    const row = document.createElement("div");
+    row.className = "mapping-row";
+    row.dataset.number = String(hit.number);
+
+    const src = document.createElement("div");
+    src.className = "col-source";
+    src.textContent = `${hit.relativePath}:${hit.lineNumber}`;
+
+    const valueEl = document.createElement("div");
+    valueEl.className = "col-source";
+    valueEl.textContent = hit.value;
+
+    const select = document.createElement("select");
+    select.className = "fix-st-choice";
+    [
+      ["artist", "Artist"],
+      ["composer", "Composer"],
+      ["both", "Both (artist + composer)"],
+      ["skip", "Leave as {st:}"],
+    ].forEach(([choiceValue, text]) => {
+      const opt = document.createElement("option");
+      opt.value = choiceValue; opt.textContent = text;
+      select.appendChild(opt);
+    });
+    select.value = "artist";
+
+    row.append(src, valueEl, select);
+    container.appendChild(row);
+  });
+
+  $("fixStDirectiveSummary").textContent =
+    `${hits.length} occurrence(s) across ${new Set(hits.map((h) => h.relativePath)).size} file(s).`;
+}
+
+async function applyFixStDirective() {
+  if (!dirHandle || !fixStDirectiveHits.length) return;
+  const container = $("fixStDirectiveBody");
+  const choicesByNumber = {};
+  container.querySelectorAll(".mapping-row").forEach((row) => {
+    choicesByNumber[Number(row.dataset.number)] = row.querySelector(".fix-st-choice").value;
+  });
+
+  try {
+    const result = await applyStDirectiveFixes(dirHandle, fixStDirectiveHits, choicesByNumber);
+    log(
+      `Fixed {st:} credits: rewrote ${result.filesChanged} file(s), ${result.occurrences} occurrence(s). ` +
+        `Backup: ${result.backupPath}`,
+      "ok",
+    );
+  } catch (e) {
+    log("Failed to apply {st:} fixes: " + (e && e.message ? e.message : e), "error");
+  }
+  $("fixStDirectiveModal").classList.add("hidden");
+  fixStDirectiveHits = [];
 }
 
 /* ---------- merge-mapping builder modal ---------- */
@@ -2166,6 +2261,7 @@ async function refreshModeCards() {
   $("showBtn").disabled = !(hasJson || hasHtml);
   $("cardEdit").classList.toggle("hidden", !hasJson);
   $("editBtn").disabled = !hasJson;
+  $("fixStBtn").disabled = !dirHandle;
   refreshBuildStepActions();
 }
 async function openBuild() {
@@ -2237,7 +2333,7 @@ function isModeViewActive() {
 }
 
 function isModalOpen() {
-  const ids = ["modal", "settingsModal", "mergeMappingModal", "collectionLabelsModal", "optionGroupModal"];
+  const ids = ["modal", "settingsModal", "mergeMappingModal", "collectionLabelsModal", "optionGroupModal", "fixStDirectiveModal"];
   return ids.some((id) => {
     const el = $(id);
     return !!(el && !el.classList.contains("hidden"));
@@ -3050,6 +3146,10 @@ function boot() {
   $("collectionLabelsCancel").addEventListener("click", () => $("collectionLabelsModal").classList.add("hidden"));
   $("collectionLabelsApply").addEventListener("click", applyCollectionLabels);
   $("collectionLabelsModal").addEventListener("click", (e) => { if (e.target === $("collectionLabelsModal")) $("collectionLabelsModal").classList.add("hidden"); });
+  $("fixStBtn").addEventListener("click", openFixStDirectiveModal);
+  $("fixStDirectiveCancel").addEventListener("click", () => { $("fixStDirectiveModal").classList.add("hidden"); fixStDirectiveHits = []; });
+  $("fixStDirectiveApply").addEventListener("click", applyFixStDirective);
+  $("fixStDirectiveModal").addEventListener("click", (e) => { if (e.target === $("fixStDirectiveModal")) { $("fixStDirectiveModal").classList.add("hidden"); fixStDirectiveHits = []; } });
   $("mappingConfigFile").addEventListener("change", (e) => {
     if (e.target.files && e.target.files.length) loadMappingConfigFile(e.target.files[0]);
   });

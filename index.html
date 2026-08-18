@@ -426,6 +426,7 @@
     <button id="showBtn" class="secondary hidden" style="padding:5px 10px;" disabled>Show</button>
     <button id="rebuildBtn" class="secondary hidden" style="padding:5px 10px;">Build</button>
     <button id="editBtn" class="secondary hidden" style="padding:5px 10px;" disabled>Edit</button>
+    <button id="fixStBtn" class="secondary hidden" style="padding:5px 10px;" disabled>Fix old {st:} credits&hellip;</button>
     <div class="spacer"></div>
     <button id="settingsBtn" class="secondary hidden" style="padding:5px 10px;">&#9881; Settings</button>
   </div>
@@ -683,6 +684,21 @@
     <div class="actions">
       <button id="collectionLabelsCancel" class="secondary" type="button">Cancel</button>
       <button id="collectionLabelsApply" type="button">Apply</button>
+    </div>
+  </div>
+</div>
+
+<div id="fixStDirectiveModal" class="modal-overlay hidden">
+  <div class="modal mapping-modal">
+    <h3>Fix old {st:} credits</h3>
+    <p class="hint" style="margin:-8px 0 0;">Charts from before this app split artist/subtitle sometimes use <code>{st:}</code> for a
+      performer or composer credit. Choose what each occurrence should become, then apply — the originals are backed up to a zip
+      first.</p>
+    <div id="fixStDirectiveSummary" class="hint"></div>
+    <div id="fixStDirectiveBody" class="mapping-body"></div>
+    <div class="actions">
+      <button id="fixStDirectiveCancel" class="secondary" type="button">Cancel</button>
+      <button id="fixStDirectiveApply" type="button">Apply</button>
     </div>
   </div>
 </div>
