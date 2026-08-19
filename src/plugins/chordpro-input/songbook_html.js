@@ -41,13 +41,30 @@ const CRATE_FILE = "ro-crate-metadata.json";
 export const OUTPUT_FILE = "songbook.html";
 
 // A canonical Song entity, not a setlist-entry proxy — both are typed
-// MusicComposition (chordpro-input's own SPEC.md §7), told apart by
-// whether "text" is present, exactly as that plugin's own tests do. Used
-// only for the build-log song count (see the module comment above) — the
-// embedded client-side app (below) re-expresses this same test itself,
+// MusicComposition (chordpro-input's own SPEC.md §7). Told apart by
+// specializationOf (PROV, not schema.org — but present in RO-Crate's own
+// context regardless), the semantically correct relationship for this:
+// an entry that resolved to a song genuinely *is* a specialization of it,
+// so checking for that property's presence is a meaningful test, not an
+// arbitrary flag — never checked by @id shape or by which of an entity's
+// other properties happen to exist (this used to check for `text`, back
+// when only a canonical Song ever had any — now that an entry's own
+// performance note is *also* written as `text`, SPEC.md §6/§7, that check
+// would misclassify any entry with a note as a canonical song).
+// specializationOf alone isn't quite complete, though: an *unresolved*
+// entry (chordpro_crate.js's own matchEntryToSong found no song at all —
+// SPEC.md §6.1) has no specializationOf either, since there's genuinely
+// nothing for it to specialize — common enough in real setlists to matter,
+// not a hypothetical edge case. custom:matchStatus closes that gap: unlike
+// specializationOf, chordpro_crate.js writes it unconditionally onto every
+// entry regardless of resolution, and never onto a canonical Song, so it's
+// a complete signal on its own for the one case specializationOf can't
+// cover — not a fallback to id-sniffing, a second, equally real property.
+// Used only for the build-log song count (see the module comment above) —
+// the embedded client-side app (below) re-expresses this same test itself,
 // inline, since it cannot import this function into the page.
 function isCanonicalSong(entity) {
-  return "text" in entity;
+  return !("specializationOf" in entity) && !("custom:matchStatus" in entity);
 }
 
 // Guards against a literal "</script" inside the embedded JSON (e.g. in a
@@ -91,6 +108,85 @@ export function initSongbookApp(document, window) {
   const graph = Array.isArray(crate["@graph"]) ? crate["@graph"] : [];
   const asArray = (value) => (value === undefined || value === null ? [] : Array.isArray(value) ? value : [value]);
 
+  // A minimal, dependency-free Markdown-ish renderer for setlist/set notes
+  // (SPEC.md §6/§6.2) — these can be real Markdown (chordprosite's own
+  // sample setlist already mixed blockquote syntax with **bold** — SPEC.md
+  // §6), so rendering as plain textContent left "**that**" showing its own
+  // literal asterisks rather than emphasis. Deliberately not a general
+  // Markdown implementation: only what a setlist note actually uses —
+  // paragraphs, blockquote lines ("> "/">> ", any depth flattened to one
+  // level), numbered ("1. ") and bullet ("- "/"* ") lists, and inline
+  // **bold**/*italic* — rather than embedding a full Markdown library into
+  // a page that has to stay one dependency-free file, openable via file://.
+  //
+  // Builds real DOM nodes via createElement, appended directly into a given
+  // container, rather than assembling an HTML string for .innerHTML — the
+  // same reason buildFrontMatterPages (§13) builds its own table-of-contents
+  // via createElement/textContent instead of a string of list-item markup:
+  // this function's own source is embedded into the page via .toString(),
+  // so an HTML-string template literal spelling out an actual tag would
+  // leave that literal text sitting in the page's own embedded script —
+  // indistinguishable, to a build-time check for "did anything get
+  // pre-rendered", from the page actually shipping one. Using createElement
+  // with a bare tag-name string instead avoids that entirely, and needs no
+  // HTML-escaping of the note's own text either, since textContent is never
+  // interpreted as markup to begin with.
+  //
+  // Works line by line rather than splitting on blank lines between
+  // paragraphs: Setlist.js's own note-collection (chordprobook's
+  // parseSetlist) already discards blank lines while joining a note's
+  // non-blank ones with "\n" (SPEC.md §6), so by the time text reaches
+  // here, a blank-line-separated paragraph and the list right after it are
+  // already just adjacent lines with no blank line between them to split
+  // on. A block boundary is instead wherever a line's own detected type
+  // (blockquote/ordered-list/bullet-list/paragraph) changes from the line
+  // before it — consecutive lines of the same type join into one block.
+  function appendInlineMarkdown(parent, text) {
+    for (const token of text.split(/(\*\*[^*]+\*\*|\*[^*]+\*)/).filter(Boolean)) {
+      let tag = "span";
+      let content = token;
+      if (/^\*\*[^*]+\*\*$/.test(token)) { tag = "strong"; content = token.slice(2, -2); }
+      else if (/^\*[^*]+\*$/.test(token)) { tag = "em"; content = token.slice(1, -1); }
+      const el = document.createElement(tag);
+      el.textContent = content;
+      parent.appendChild(el);
+    }
+  }
+  function renderNoteMarkdown(container, text) {
+    container.replaceChildren();
+    const lines = String(text ?? "").split("\n").map((line) => line.trim()).filter(Boolean);
+    let type = null;
+    let blockElement = null; // the current paragraph/ordered-list/bullet-list/blockquote element, created fresh whenever type changes
+    for (const line of lines) {
+      let lineType, content;
+      if (/^>+\s?/.test(line)) { lineType = "blockquote"; content = line.replace(/^>+\s?/, ""); }
+      else if (/^\d+\.\s/.test(line)) { lineType = "ol"; content = line.replace(/^\d+\.\s/, ""); }
+      else if (/^[-*]\s/.test(line)) { lineType = "ul"; content = line.replace(/^[-*]\s/, ""); }
+      else { lineType = "p"; content = line; }
+
+      if (lineType !== type) {
+        type = lineType;
+        blockElement = document.createElement(lineType);
+        container.appendChild(blockElement);
+      }
+
+      if (lineType === "ol" || lineType === "ul") {
+        const item = document.createElement("li");
+        appendInlineMarkdown(item, content);
+        blockElement.appendChild(item);
+      } else if (lineType === "blockquote") {
+        // Any ">" depth flattens to one level — a blockquote holding one
+        // paragraph per line, rather than modelling true nesting depth.
+        const p = document.createElement("p");
+        appendInlineMarkdown(p, content);
+        blockElement.appendChild(p);
+      } else {
+        if (blockElement.children.length) blockElement.appendChild(document.createElement("br"));
+        appendInlineMarkdown(blockElement, content);
+      }
+    }
+  }
+
   // composer/performer/subtitle/key: read via asArray()[0], same defensive
   // habit as `name` just below — chordpro_crate.js itself only ever writes
   // these as plain strings (SPEC.md §7), but nothing here can assume the
@@ -98,8 +194,15 @@ export function initSongbookApp(document, window) {
   // array on its way through resolveContext()/getJson(). "" (not undefined)
   // for a song with no such directive, so every consumer below can test
   // truthiness directly rather than each needing its own `|| ""`.
+  // Canonical songs only, not setlist-entry proxies — both share the
+  // MusicComposition type, told apart by specializationOf/custom:matchStatus
+  // (module-level isCanonicalSong's own comment explains why both, not
+  // just one), not by whether `text` happens to be present: an entry can
+  // carry its own `text` too now (its performance note, SPEC.md §6/§7),
+  // which would wrongly include it here if this still checked for that.
   const songs = graph
-    .filter((entity) => asArray(entity["@type"]).includes("MusicComposition") && "text" in entity)
+    .filter((entity) => asArray(entity["@type"]).includes("MusicComposition")
+      && !("specializationOf" in entity) && !("custom:matchStatus" in entity))
     .map((entity) => ({
       id: entity["@id"],
       name: String(asArray(entity.name)[0] || entity["@id"]),
@@ -146,34 +249,92 @@ export function initSongbookApp(document, window) {
     }
   }
 
-  // Setlist-entry proxies (SPEC.md §7): MusicComposition entities with no
-  // "text" of their own — the same test isCanonicalSong/the songs filter
-  // above uses, from the other side. songIndex resolves specializationOf
-  // to a position in `songs` once, here, rather than re-searching it every
-  // time an entry is rendered or clicked; -1 for an entry matchEntryToSong
-  // (chordpro_crate.js, build time) never resolved to a real song at all.
+  // Setlist-entry proxies (SPEC.md §7): MusicComposition entities carrying
+  // specializationOf and/or custom:matchStatus — the same test the songs
+  // filter above uses, from the other side (not "no text of their own": an
+  // entry can carry its own `text` now, its performance note). songIndex
+  // resolves specializationOf to a position in `songs` once, here, rather
+  // than re-searching it every time an entry is rendered or clicked; -1 for
+  // an entry matchEntryToSong (chordpro_crate.js, build time) never
+  // resolved to a real song at all (no specializationOf at all, in that
+  // case — matchStatus alone is what still marks it as an entry, not a
+  // canonical song). Which set (if any) an entry belongs to is no longer a
+  // property on the entry itself (custom:setName is gone — SPEC.md §6/§7)
+  // — flattenSetlistParts, below, derives it from the set/sub-playlist
+  // hierarchy instead.
   const entriesById = {};
   for (const entity of graph) {
-    if (!asArray(entity["@type"]).includes("MusicComposition") || "text" in entity) continue;
+    const isEntry = "specializationOf" in entity || "custom:matchStatus" in entity;
+    if (!asArray(entity["@type"]).includes("MusicComposition") || !isEntry) continue;
     const songId = entity.specializationOf && entity.specializationOf["@id"];
     entriesById[entity["@id"]] = {
       name: String(asArray(entity.name)[0] || entity["@id"]),
-      setName: entity["custom:setName"] || "",
       matchStatus: entity["custom:matchStatus"] || "unresolved",
-      notes: entity.description || "",
+      notes: entity.text || "",
       transpose: entity["custom:transpose"],
       capo: Number.isInteger(entity["custom:capo"]) ? entity["custom:capo"] : undefined,
       songIndex: songId ? songs.findIndex((song) => song.id === songId) : -1,
     };
   }
 
+  // Every MusicPlaylist entity, keyed by @id — both a top-level setlist and
+  // a nested "# Set" sub-playlist inside one share this one @type
+  // (chordpro_crate.js, SPEC.md §6), told apart only by @id shape: a nested
+  // set's is always `<setlist path>#set-N`, which a real setlist file's own
+  // path can never look like (a "#" isn't valid in one).
+  const playlistEntitiesById = {};
+  for (const entity of graph) {
+    if (asArray(entity["@type"]).includes("MusicPlaylist")) playlistEntitiesById[entity["@id"]] = entity;
+  }
+
+  // Turns one setlist's own hasPart — a mix of direct entry references and
+  // nested "# Set" sub-playlist references, in file order (SPEC.md §6) —
+  // into the flat entries array renderSetlistEntries()/getActivePlaylist()/
+  // showPrintSetlist() etc. already expect, same as before this hierarchy
+  // existed at all. Each entry gets its own setName/setNotes attached fresh
+  // here (never mutating entriesById's own shared objects, which a future
+  // change could end up referencing from more than one place) — setNotes
+  // (a set's own freeform text between its "#" heading and its first entry,
+  // chordpro_crate.js's own `text` on the set entity — SPEC.md §6/§7) is
+  // attached to only the *first* entry of that set, so a flat walk through
+  // the result renders it exactly once, right where the "Set N" heading
+  // belongs.
+  function flattenSetlistParts(hasPart) {
+    const flat = [];
+    for (const ref of asArray(hasPart)) {
+      const part = playlistEntitiesById[ref["@id"]];
+      if (part) {
+        const setName = String(asArray(part.name)[0] || "");
+        const setNotes = part.text || "";
+        asArray(part.hasPart).forEach((entryRef, i) => {
+          const entry = entriesById[entryRef["@id"]];
+          if (entry) flat.push({ ...entry, setName, setNotes: i === 0 ? setNotes : "" });
+        });
+      } else {
+        const entry = entriesById[ref["@id"]];
+        if (entry) flat.push({ ...entry, setName: "", setNotes: "" });
+      }
+    }
+    return flat;
+  }
+
+  // Only entities actually reachable this way count as a "setlist" for the
+  // #setlist-list index — a nested "# Set" sub-playlist is also typed
+  // MusicPlaylist, but is only ever meant to be reached by walking a real
+  // setlist's own hasPart (above), never listed as its own top-level entry.
+  // Still told apart by @id shape here, unlike a canonical Song vs. a
+  // setlist-entry proxy (isCanonicalSong, above) — hasPart is used the same
+  // way in both directions (a setlist containing sets, a set containing
+  // entries), with no directional relationship like specializationOf to
+  // check for instead. Distinguishing via the crate root's own hasPart
+  // (only a real top-level file is ever listed there) would avoid @id
+  // shape entirely too, but isn't done here to keep this change scoped to
+  // what was actually asked for.
   const setlists = graph
-    .filter((entity) => asArray(entity["@type"]).includes("MusicPlaylist"))
+    .filter((entity) => asArray(entity["@type"]).includes("MusicPlaylist") && !String(entity["@id"]).includes("#"))
     .map((entity) => ({
       name: String(asArray(entity.name)[0] || entity["@id"]),
-      entries: asArray(entity.hasPart)
-        .map((ref) => entriesById[ref["@id"]])
-        .filter(Boolean),
+      entries: flattenSetlistParts(entity.hasPart),
     }));
 
   const listView = document.getElementById("list-view");
@@ -187,6 +348,10 @@ export function initSongbookApp(document, window) {
   const appBar = document.getElementById("app-bar");
   const menuBarOverflowToggle = document.getElementById("menu-bar-overflow-toggle");
   const menuBarOverflow = document.getElementById("menu-bar-overflow");
+  const setlistNotesLabel = document.getElementById("setlist-notes-label");
+  const setlistNotesCheckbox = document.getElementById("setlist-notes-checkbox");
+  const setlistNoteModal = document.getElementById("setlist-note-modal");
+  const setlistNoteModalContent = document.getElementById("setlist-note-modal-content");
   const songViewTitle = document.getElementById("song-view-title");
   // #song-content is the box fitSongContent() scales font-size against —
   // #song-header (title/key/capo, moved here from #app-bar so they scale
@@ -233,8 +398,16 @@ export function initSongbookApp(document, window) {
   const printNowButton = document.getElementById("print-now-button");
   const donePrintingButton = document.getElementById("done-printing-button");
   const printInstrumentSelect = document.getElementById("print-instrument-select");
+  const includeTocLabel = document.getElementById("include-toc-label");
+  const includeTocCheckbox = document.getElementById("include-toc-checkbox");
+  const largePrintLabel = document.getElementById("large-print-label");
   const largePrintCheckbox = document.getElementById("large-print-checkbox");
+  const facingPagesLabel = document.getElementById("facing-pages-label");
   const facingPagesCheckbox = document.getElementById("facing-pages-checkbox");
+  const floorSheetLabel = document.getElementById("floor-sheet-label");
+  const floorSheetCheckbox = document.getElementById("floor-sheet-checkbox");
+  const floorSheetNotesLabel = document.getElementById("floor-sheet-notes-label");
+  const floorSheetNotesCheckbox = document.getElementById("floor-sheet-notes-checkbox");
   const fullscreenButton = document.getElementById("fullscreen-button");
   const viewSetlistsButton = document.getElementById("view-setlists-button");
   const setlistIndexView = document.getElementById("setlist-index-view");
@@ -247,6 +420,8 @@ export function initSongbookApp(document, window) {
   const toggleNotesButton = document.getElementById("toggle-notes-button");
   const setlistEntriesElement = document.getElementById("setlist-entries");
   const songSearchInput = document.getElementById("song-search");
+  const setlistSearchInput = document.getElementById("setlist-search");
+  const setlistEntriesSearchInput = document.getElementById("setlist-entries-search");
 
   // currentIndex: position within getActivePlaylist() (below) — the
   // global song list while browsing it, but a specific setlist's own
@@ -1083,6 +1258,7 @@ export function initSongbookApp(document, window) {
   }
 
   function enterPrintView() {
+    closeSetlistNoteModal();
     setHidden(listView, true);
     setHidden(songView, true);
     setHidden(prevButton, true);
@@ -1118,6 +1294,16 @@ export function initSongbookApp(document, window) {
     const song = songs[currentSongIndex];
     if (!song) return;
     currentPrintRebuild = showPrintSong;
+    // No front matter, facing-page alignment (a book-binding concept — see
+    // alignSongStart's own comment), or floor-sheet mode makes sense for
+    // one standalone song, so those stay hidden here; large print still
+    // applies (used below), same as instrument selection.
+    setHidden(includeTocLabel, true);
+    setHidden(largePrintLabel, false);
+    setHidden(facingPagesLabel, true);
+    setHidden(floorSheetLabel, true);
+    setHidden(floorSheetNotesLabel, true);
+    setHidden(printInstrumentSelect, false);
     // ChordProSong/renderSong: bare globals from CHORDPROBOOK_BROWSER_BUNDLE
     // (see this function's own header comment above).
     const parsedSong = new ChordProSong(song.text);
@@ -1235,8 +1421,15 @@ export function initSongbookApp(document, window) {
 
   function showPrintBook() {
     currentPrintRebuild = showPrintBook;
+    setHidden(includeTocLabel, false);
+    setHidden(largePrintLabel, false);
+    setHidden(facingPagesLabel, false);
+    setHidden(floorSheetLabel, true);
+    setHidden(floorSheetNotesLabel, true);
+    setHidden(printInstrumentSelect, false);
     const large = largePrintCheckbox.checked;
     const keepFacingPages = facingPagesCheckbox.checked;
+    const includeToc = includeTocCheckbox.checked;
 
     // Rendered once per song, up front — each song's own page *count* has
     // to be known before any page *number* can be assigned (alignSongStart
@@ -1247,7 +1440,10 @@ export function initSongbookApp(document, window) {
     // section), but a song with its own {new_page} directive(s) takes one
     // page per section in normal print (buildNormalPrintSongPages) or one
     // section-pair per section in large print (buildLargePrintSongPages).
-    let pageNumber = 1 + frontMatterPageCount(songs.length);
+    // 0 instead of frontMatterPageCount() when the "Title page & contents"
+    // checkbox is unticked (SPEC.md §13) — no front matter pages means
+    // every song's own numbering starts from page 1 itself.
+    let pageNumber = 1 + (includeToc ? frontMatterPageCount(songs.length) : 0);
     const songPages = [];
     const fitJobs = [];
     const tocEntries = songs.map((song) => {
@@ -1281,11 +1477,88 @@ export function initSongbookApp(document, window) {
       return { name: song.name, pageNumber: entryPageNumber };
     });
 
-    const frontPages = buildFrontMatterPages("Songbook", tocEntries);
+    const frontPages = includeToc ? buildFrontMatterPages("Songbook", tocEntries) : [];
 
     printContent.replaceChildren(...frontPages, ...songPages);
     enterPrintView();
     fitJobs.forEach((job) => job());
+  }
+
+  // "Old school" floor sheets (SPEC.md §13, PT: "for putting at your feet
+  // while you play") — just each entry's own name in a numbered list, no
+  // chords or lyrics at all, so an entry with no matching song
+  // (entry.songIndex === -1) still gets a line here, unlike every other
+  // print path in this file — there's no page to build *for* a song that
+  // isn't there, but there's nothing stopping a plain name from being
+  // listed. Grouped the same consecutive-setName-run way
+  // groupEntriesIntoSets (chordpro_crate.js) groups a setlist file's own
+  // entries in the first place — entries sharing a setName with the one
+  // right before them stay together, and a changed or absent setName
+  // starts a new group. A setlist with no "#" sets at all becomes a
+  // single group under its own name; a setlist that does use sets gets one
+  // page per set (plus, if the setlist mixes in ungrouped entries before
+  // its first "#" heading, one further page for just those, also under the
+  // setlist's own name).
+  function groupSetlistEntriesForFloorSheet(entries) {
+    const groups = [];
+    for (const entry of entries) {
+      const last = groups[groups.length - 1];
+      if (last && last.setName === entry.setName) last.entries.push(entry);
+      else groups.push({ setName: entry.setName, entries: [entry] });
+    }
+    return groups;
+  }
+
+  // heading/entries/includeNotes -> one floor-sheet page. Notes (when
+  // included) reuse renderNoteMarkdown, same as the on-screen setlist view
+  // — no separate rendering path for print here. No page number: like
+  // showPrintSong's own standalone print, there's no book/contents page
+  // for one to refer back to.
+  function buildFloorSheetPage(heading, entries, includeNotes) {
+    const page = document.createElement("div");
+    page.className = "print-page print-floor-sheet";
+    const title = document.createElement("h1");
+    title.className = "print-floor-sheet-title";
+    title.textContent = heading;
+    page.appendChild(title);
+
+    const list = document.createElement("ol");
+    list.className = "print-floor-sheet-list";
+    for (const entry of entries) {
+      const item = document.createElement("li");
+      const name = document.createElement("span");
+      name.className = "print-floor-sheet-name";
+      name.textContent = entry.name;
+      item.appendChild(name);
+      if (includeNotes && entry.notes) {
+        const note = document.createElement("div");
+        note.className = "print-floor-sheet-note";
+        renderNoteMarkdown(note, entry.notes);
+        item.appendChild(note);
+      }
+      list.appendChild(item);
+    }
+    page.appendChild(list);
+
+    page.printFloorSheetTitleElement = title;
+    page.printFloorSheetListElement = list;
+    return page;
+  }
+
+  function buildFloorSheetPages(setlist, includeNotes) {
+    const hasSets = setlist.entries.some((entry) => entry.setName);
+    if (!hasSets) return [buildFloorSheetPage(setlist.name, setlist.entries, includeNotes)];
+    return groupSetlistEntriesForFloorSheet(setlist.entries).map((group) =>
+      buildFloorSheetPage(group.setName || setlist.name, group.entries, includeNotes),
+    );
+  }
+
+  // Same binary-search fit as fitPrintSongPage, against just the list —
+  // the heading stays whatever size it renders at, same fixed-title/
+  // scaled-body split fitPrintSongPage already uses.
+  function fitFloorSheetPage(page) {
+    const availableHeight = PRINT_CONTENT_HEIGHT_PX - page.printFloorSheetTitleElement.offsetHeight;
+    fitTextToBox(page.printFloorSheetListElement, availableHeight, PRINT_CONTENT_WIDTH_PX);
   }
 
   // Same shape as showPrintBook, scoped to one setlist's own entries in
@@ -1305,9 +1578,30 @@ export function initSongbookApp(document, window) {
     const setlist = setlists[index];
     if (!setlist) return;
     currentPrintRebuild = () => showPrintSetlist(index);
+    const floorSheet = floorSheetCheckbox.checked;
+    // Floor-sheet mode is a setlist-only alternative to the normal
+    // book-style print below, not a variant of it (SPEC.md §13) — none of
+    // large print/facing pages/instrument/TOC apply to a page that carries
+    // no chords or lyrics at all, so they're hidden rather than merely
+    // ignored, and the function returns before reaching any of that code.
+    setHidden(floorSheetLabel, false);
+    setHidden(floorSheetNotesLabel, !floorSheet);
+    setHidden(includeTocLabel, floorSheet);
+    setHidden(largePrintLabel, floorSheet);
+    setHidden(facingPagesLabel, floorSheet);
+    setHidden(printInstrumentSelect, floorSheet);
+    if (floorSheet) {
+      const pages = buildFloorSheetPages(setlist, floorSheetNotesCheckbox.checked);
+      printContent.replaceChildren(...pages);
+      enterPrintView();
+      pages.forEach(fitFloorSheetPage);
+      return;
+    }
+
     const large = largePrintCheckbox.checked;
     const keepFacingPages = facingPagesCheckbox.checked;
-    let pageNumber = 1 + frontMatterPageCount(setlist.entries.length);
+    const includeToc = includeTocCheckbox.checked;
+    let pageNumber = 1 + (includeToc ? frontMatterPageCount(setlist.entries.length) : 0);
 
     const songPages = [];
     const fitJobs = [];
@@ -1339,7 +1633,7 @@ export function initSongbookApp(document, window) {
       pageNumber += pageCount;
       return { name: entry.name, pageNumber: entryPageNumber };
     });
-    const frontPages = buildFrontMatterPages(setlist.name, tocEntries);
+    const frontPages = includeToc ? buildFrontMatterPages(setlist.name, tocEntries) : [];
 
     printContent.replaceChildren(...frontPages, ...songPages);
     enterPrintView();
@@ -1358,10 +1652,13 @@ export function initSongbookApp(document, window) {
     toggleNotesButton.textContent = notesVisible ? "Hide notes" : "Show notes";
   }
 
-  // One row per entry, grouped under a heading whenever custom:setName
-  // changes from the entry before it (SPEC.md §6's own set groupings, e.g.
-  // "Set 1"/"Set 2" in the source markdown) — entries without a setName at
-  // all just don't get a heading, rather than one reading "undefined".
+  // One row per entry, grouped under a heading whenever setName changes
+  // from the entry before it (SPEC.md §6's own set groupings, e.g. "Set 1"/
+  // "Set 2" in the source markdown, now expressed as nested MusicPlaylist
+  // entities rather than a flat property — flattenSetlistParts, above, is
+  // what attaches setName/setNotes to each entry) — entries without a
+  // setName at all just don't get a heading, rather than one reading
+  // "undefined".
   function renderSetlistEntries(setlist) {
     setlistEntriesElement.replaceChildren();
     let lastSetName = null;
@@ -1377,12 +1674,46 @@ export function initSongbookApp(document, window) {
         heading.textContent = entry.setName;
         setlistEntriesElement.appendChild(heading);
         lastSetName = entry.setName;
+        // Freeform text between the set's own "#" heading and this, its
+        // first entry (e.g. "Tune guitars to drop D now") — no searchText
+        // property, so "Find in this setlist" (applySetlistEntriesFilter)
+        // treats it the same as the heading right above it: always shown.
+        if (entry.setNotes) {
+          const setNotes = document.createElement("div");
+          setNotes.className = "setlist-set-notes";
+          renderNoteMarkdown(setNotes, entry.setNotes);
+          setlistEntriesElement.appendChild(setNotes);
+        }
       }
       const isPlayable = entry.songIndex >= 0;
       setlistEntriesElement.appendChild(
         buildSetlistEntryRow(entry, index + 1, isPlayable ? playablePosition : null),
       );
       if (isPlayable) playablePosition += 1;
+    });
+    // Re-applies whatever's currently typed in "Find in this setlist"
+    // (below) — this function also runs on a plain notes-visibility toggle
+    // (toggleNotesButton's own handler), not only when a genuinely
+    // different setlist opens (showSetlist, which clears the search box
+    // first); without this, that toggle would silently drop an active
+    // filter by rebuilding every row with none of them hidden.
+    applySetlistEntriesFilter();
+  }
+
+  // "Find in this setlist" (#setlist-entries-search) — filters
+  // #setlist-entries' own entry rows (never the "Set N" heading rows
+  // interspersed among them, identifiable by having no searchText at all —
+  // see buildSetlistEntryRow's own comment) by substring match against each
+  // row's own searchText. Not index-parallel with `setlist.entries` the way
+  // #song-search/#setlist-search are with their own arrays: headings mean a
+  // row's position in setlistEntriesElement.children doesn't line up with
+  // its position in setlist.entries, so matching is done from data stashed
+  // directly on each row at build time instead.
+  function applySetlistEntriesFilter() {
+    const query = setlistEntriesSearchInput.value.trim().toLowerCase();
+    Array.from(setlistEntriesElement.children).forEach((item) => {
+      if (item.searchText === undefined) return; // a "Set N" heading — always shown
+      setHidden(item, query.length > 0 && !item.searchText.includes(query));
     });
   }
 
@@ -1427,28 +1758,43 @@ export function initSongbookApp(document, window) {
     // mismatch here means that heading doesn't clearly identify one real
     // song, which is fixed by editing the .setlist.md file and rebuilding
     // the crate, not by anything this read-only page can do itself
-    // (SPEC.md §2 rules out writing back to the source folder). Surfacing
-    // this clearly is the point PT asked for: "helping the user fix
-    // mismatches back in the crate-gen stage."
+    // (SPEC.md §2 rules out writing back to the source folder). The full
+    // message lives in `title` (a native tooltip on hover/focus) rather
+    // than sitting in the row itself — PT: a small "~" mark instead of a
+    // full warning box, so a row with a mismatch doesn't visually dominate
+    // the rows around it; the detail is still one hover away, not lost.
     if (entry.matchStatus !== "exact") {
       const statusMessages = {
         unresolved: "no matching song found — check this entry's heading against the song titles",
         ambiguous: "matches more than one song — make this entry's heading more specific",
         fuzzy: "matched approximately, not exactly — check this is the right song",
       };
+      const message = statusMessages[entry.matchStatus] || entry.matchStatus;
       const status = document.createElement("span");
       status.className = "setlist-entry-status";
-      status.textContent = `⚠ ${statusMessages[entry.matchStatus] || entry.matchStatus}`;
+      status.textContent = "~";
+      status.title = message;
+      status.setAttribute("aria-label", message);
       row.appendChild(status);
     }
 
     if (entry.notes) {
       const notes = document.createElement("div");
       notes.className = "setlist-entry-notes";
-      notes.textContent = entry.notes;
+      renderNoteMarkdown(notes, entry.notes);
       setHidden(notes, !notesVisible);
       row.appendChild(notes);
     }
+
+    // A plain JS property, not an attribute — nothing outside this file
+    // ever needs to read it back off real HTML, only applySetlistEntriesFilter
+    // (below), so there's no reason to serialize it into the DOM at all.
+    // Combines the same text the row actually shows (heading, credit,
+    // notes) — matching "Find a song"'s own precedent (SPEC.md §12) of
+    // searching what's displayed, not raw underlying data the row doesn't
+    // surface.
+    const credit = entry.songIndex >= 0 ? creditFor(songs[entry.songIndex]) : "";
+    row.searchText = `${entry.name} ${credit} ${entry.notes || ""}`.toLowerCase();
 
     return row;
   }
@@ -1459,6 +1805,7 @@ export function initSongbookApp(document, window) {
     currentSetlistIndex = index;
     currentIndex = -1;
     currentSongIndex = -1;
+    closeSetlistNoteModal();
 
     setHidden(listView, true);
     setHidden(songView, true);
@@ -1477,6 +1824,13 @@ export function initSongbookApp(document, window) {
 
     setlistViewTitle.textContent = setlist.name;
     updateToggleNotesButtonLabel();
+    // Cleared here, not inside renderSetlistEntries itself — that function
+    // also runs on a plain notes-visibility toggle within the *same*
+    // setlist (toggleNotesButton's own handler), where a search the reader
+    // just typed should survive the refresh, not vanish. Opening a setlist
+    // at all — including re-opening the one already open, from the index —
+    // is the one point a leftover query from a previous setlist should not.
+    setlistEntriesSearchInput.value = "";
     renderSetlistEntries(setlist);
   }
 
@@ -1484,6 +1838,7 @@ export function initSongbookApp(document, window) {
     currentIndex = -1;
     currentSongIndex = -1;
     currentSetlistIndex = -1;
+    closeSetlistNoteModal();
     setHidden(listView, true);
     setHidden(songView, true);
     setHidden(prevButton, true);
@@ -1504,6 +1859,7 @@ export function initSongbookApp(document, window) {
     currentIndex = -1;
     currentSongIndex = -1;
     currentSetlistIndex = -1;
+    closeSetlistNoteModal();
     setHidden(listView, false);
     setHidden(songView, true);
     setHidden(prevButton, true);
@@ -1537,9 +1893,9 @@ export function initSongbookApp(document, window) {
     if (currentSetlistIndex >= 0) {
       return setlists[currentSetlistIndex].entries
         .filter((entry) => entry.songIndex >= 0)
-        .map((entry) => ({ songIndex: entry.songIndex, transpose: entry.transpose, capo: entry.capo }));
+        .map((entry) => ({ songIndex: entry.songIndex, transpose: entry.transpose, capo: entry.capo, notes: entry.notes }));
     }
-    return songs.map((_song, index) => ({ songIndex: index, transpose: undefined, capo: undefined }));
+    return songs.map((_song, index) => ({ songIndex: index, transpose: undefined, capo: undefined, notes: "" }));
   }
 
   // position indexes into getActivePlaylist(), not directly into `songs` —
@@ -1588,12 +1944,42 @@ export function initSongbookApp(document, window) {
     setHidden(setlistView, true);
     setHidden(setlistIndexView, true);
     menuBarOverflow.classList.remove("open");
+    // Meaningless outside a setlist — there's no entry, and so no note, to
+    // show or hide a modal for (SPEC.md §6.2) — hidden the same way every
+    // other setlist-only control in this bar already is.
+    setHidden(setlistNotesLabel, currentSetlistIndex < 0);
 
     songViewTitle.textContent = song.name;
     prevButton.disabled = position <= 0;
     nextButton.disabled = position >= playlist.length - 1;
 
     renderCurrentSong();
+
+    // Re-evaluated on every call, not just once per setlist — a different
+    // entry can have a different note (or none at all), so this has to be
+    // freshly decided each time a song is opened, including navigating
+    // between two songs that are both in the same setlist.
+    if (currentSetlistIndex >= 0 && slot.notes && setlistNotesCheckbox.checked) {
+      openSetlistNoteModal(slot.notes);
+    } else {
+      closeSetlistNoteModal();
+    }
+  }
+
+  // A modal shown over the song itself when opening it from within a
+  // setlist (SPEC.md §6.2) — PT: "put up a modal over the song with the
+  // notes on it eg 'Tune guitars to drop D now'". Rendered as Markdown, the
+  // same as the setlist-list's own entry/set notes (§6/§6.2) — it's the
+  // exact same note text, just surfaced a second time at the moment it's
+  // actually needed (about to play this song), not only back in the list a
+  // reader may have scrolled away from already. Dismissed by a click
+  // anywhere on it (PT's own spec), not just a specific close button.
+  function openSetlistNoteModal(notes) {
+    renderNoteMarkdown(setlistNoteModalContent, notes);
+    setHidden(setlistNoteModal, false);
+  }
+  function closeSetlistNoteModal() {
+    setHidden(setlistNoteModal, true);
   }
 
   // "Back to list" means back to whichever list is currently active — the
@@ -1633,6 +2019,31 @@ export function initSongbookApp(document, window) {
   }
   viewSetlistsButton.addEventListener("click", showSetlistIndex);
   backFromSetlistIndexButton.addEventListener("click", showList);
+
+  // "Find a setlist" — same idea as "Find a song" below (#song-search),
+  // filtering #setlist-list's own rows in place by case-insensitive
+  // substring match against the setlist's own name. #setlist-list is
+  // index-parallel with `setlists` (built from it, in the same order, just
+  // above), so filtering by index needs no querySelector/lookup, same as
+  // the song list.
+  setlistSearchInput.addEventListener("input", () => {
+    const query = setlistSearchInput.value.trim().toLowerCase();
+    Array.from(setlistListElement.children).forEach((item, index) => {
+      setHidden(item, query.length > 0 && !setlists[index].name.toLowerCase().includes(query));
+    });
+  });
+
+  setlistEntriesSearchInput.addEventListener("input", applySetlistEntriesFilter);
+
+  // "Any click on that should make it go away" (PT, SPEC.md §6.2) — the
+  // whole modal is the dismiss target, not a specific close button.
+  setlistNoteModal.addEventListener("click", closeSetlistNoteModal);
+  // Unchecking while a note is already showing hides it immediately, rather
+  // than waiting for the reader to navigate to another song before the new
+  // preference takes effect.
+  setlistNotesCheckbox.addEventListener("change", () => {
+    if (!setlistNotesCheckbox.checked) closeSetlistNoteModal();
+  });
 
   songs.forEach((song, index) => {
     const item = document.createElement("li");
@@ -1759,6 +2170,25 @@ export function initSongbookApp(document, window) {
   // here — PT: default on for double-sided printing. Same no-separate-
   // state reasoning as largePrintCheckbox just above.
   facingPagesCheckbox.addEventListener("change", () => {
+    if (currentPrintRebuild) currentPrintRebuild();
+  });
+  // Checked by default (SPEC.md §13) — unticking it skips
+  // buildFrontMatterPages entirely (showPrintBook/showPrintSetlist), for a
+  // reader who's printing a short set and doesn't want a title/contents
+  // page ahead of it. Same no-separate-state reasoning as the checkboxes
+  // above.
+  includeTocCheckbox.addEventListener("change", () => {
+    if (currentPrintRebuild) currentPrintRebuild();
+  });
+  // Only ever visible/relevant for a setlist print (showPrintSetlist shows
+  // floorSheetLabel; showPrintSong/showPrintBook never do — see those
+  // functions' own setHidden calls), so there's no need to guard this
+  // listener itself on what's currently being printed.
+  floorSheetCheckbox.addEventListener("change", () => {
+    setHidden(floorSheetNotesLabel, !floorSheetCheckbox.checked);
+    if (currentPrintRebuild) currentPrintRebuild();
+  });
+  floorSheetNotesCheckbox.addEventListener("change", () => {
     if (currentPrintRebuild) currentPrintRebuild();
   });
 
@@ -2039,7 +2469,7 @@ body {
   font-size: 0.95rem;
   cursor: pointer;
 }
-#song-search {
+#song-search, #setlist-search, #setlist-entries-search {
   display: block;
   width: 100%;
   margin-top: 1rem;
@@ -2224,12 +2654,34 @@ body {
    rule of their own needed. */
 
 /* #print-view is a third top-level view alongside #list-view/#song-view
-   (see enterPrintView()/exitPrintView() in initSongbookApp). */
-#print-view { padding: 1.5rem; overflow-x: auto; }
+   (see enterPrintView()/exitPrintView() in initSongbookApp). position:
+   relative so #done-printing-button (an absolutely-positioned child, right
+   below) anchors to this view's own box. */
+#print-view { position: relative; padding: 1.5rem; overflow-x: auto; }
+/* PT: "the done printing box is more like a window / modal close button" —
+   a small fixed "x" in the view's own top-right corner, same spot a
+   browser tab or dialog's own close control sits, rather than an inline
+   text button competing for space in the banner's row of other controls
+   below. */
+#done-printing-button {
+  position: absolute;
+  top: 0.75rem;
+  right: 0.75rem;
+  width: 2.25rem;
+  height: 2.25rem;
+  line-height: 1;
+  border: 2px solid var(--ink);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--ink);
+  font-size: 1.4rem;
+  font-family: inherit;
+  cursor: pointer;
+}
 #print-banner {
   max-width: 46rem;
   margin: 0 auto 1.5rem;
-  padding: 1rem;
+  padding: 1rem 3rem 1rem 1rem;
   border: 2px solid var(--ink);
 }
 #print-banner button, #print-banner select {
@@ -2243,7 +2695,7 @@ body {
   font-size: 0.95rem;
   cursor: pointer;
 }
-#large-print-label, #facing-pages-label {
+#include-toc-label, #large-print-label, #facing-pages-label, #floor-sheet-label, #floor-sheet-notes-label {
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
@@ -2345,6 +2797,36 @@ body {
   gap: 0.4rem;
 }
 
+/* Floor sheets (SPEC.md §13, buildFloorSheetPage/buildFloorSheetPages) —
+   just a title and a plain numbered list of names, no chord-row layout at
+   all, so this gets its own, much simpler rules rather than reusing
+   .print-song-row/.print-song-body. Sized larger than a normal song page's
+   body text by default (readable from further away, at your feet) —
+   fitFloorSheetPage's own binary search only ever scales this *down* from
+   here, when a set has enough entries (or long enough notes) to need it. */
+/* margin: 0 0 0.15rem, not a bigger, more "designed" gap — same reasoning
+   as .print-title-page h1/.print-song-title's own identical rule: the
+   default user-agent margin above an <h1> is exactly what
+   fitFloorSheetPage's own availableHeight budget can't see (offsetHeight
+   excludes margin entirely), so a non-zero top margin here would silently
+   eat into the space it thinks the list still has. */
+.print-floor-sheet-title { margin: 0 0 0.15rem; }
+.print-floor-sheet-list {
+  margin: 0;
+  padding-left: 1.5em;
+  font-size: 1.3rem;
+  line-height: 1.6;
+}
+/* padding-bottom, not margin-bottom — a margin on the *last* list item
+   collapses straight through .print-floor-sheet-list's own bottom edge (no
+   padding/border there to stop it) and inflates the page's real height
+   beyond what fitFloorSheetPage measured via the list's own scrollHeight,
+   which can't see a margin that already escaped it. Padding never
+   collapses. */
+.print-floor-sheet-list li { padding-bottom: 0.4em; }
+.print-floor-sheet-name { font-weight: 700; }
+.print-floor-sheet-note { font-size: 0.7em; font-weight: 400; color: var(--muted); font-style: italic; }
+
 @media print {
   /* Only #print-content is meant to end up on paper — the on-screen
      instructions/buttons above it, and anything from the other two views
@@ -2352,7 +2834,7 @@ body {
      button lives in #app-bar, which stays mounted (and un-hidden) across
      every view specifically so it's always reachable — "always", it turns
      out, still isn't supposed to include an actual printed page. */
-  #print-banner, #fullscreen-button { display: none; }
+  #print-banner, #fullscreen-button, #done-printing-button { display: none; }
   #print-view { padding: 0; overflow: visible; }
   /* The border/gap between pages is an on-screen page-separator cue only —
      printed pages are separated by actual paper, not a rule between them,
@@ -2389,6 +2871,10 @@ body {
   cursor: pointer;
 }
 .setlist-set-name { margin: 1.5rem 0 0.5rem; font-size: 1.05rem; }
+/* A set's own freeform note (SPEC.md §6/§6.2), between its "Set N" heading
+   and its first entry — same treatment as an entry's own .setlist-entry-notes
+   below, so the two read as the same kind of thing at a glance. */
+.setlist-set-notes { margin: -0.25rem 0 0.5rem; color: var(--muted); font-style: italic; }
 .setlist-entry {
   display: flex;
   align-items: baseline;
@@ -2400,19 +2886,65 @@ body {
 .setlist-entry-position { color: var(--muted); font-variant-numeric: tabular-nums; }
 .setlist-entry-name { color: var(--ink); font-weight: 600; }
 a.setlist-entry-name:hover { text-decoration: underline; }
-/* A bordered badge, not colour: --chord red is reserved for chord names on
-   the song page itself (SPEC.md §11's own "Visual design" note — every
-   other control uses plain black/white specifically so red stays a single,
-   unambiguous marker), so this can't borrow colour to stand out and uses a
-   border instead, the same "shape/weight, not fill or colour" idiom already
-   used for chorus/bridge and disabled buttons elsewhere on this page. */
+/* A small red mark, not the full message inline — PT explicitly asked for
+   this over the previous bordered warning box, which dominated the row it
+   sat in. A deliberate, narrow exception to red (--chord) otherwise being
+   reserved exclusively for chord names on the song page (SPEC.md §14) —
+   the two never appear in the same view, so there's no real ambiguity risk
+   in practice, but it is a second thing red now means, not one. The full
+   message lives in the title attribute (a native hover/focus tooltip),
+   not in visible text at all. */
 .setlist-entry-status {
-  border: 1px solid var(--ink);
-  padding: 0.15rem 0.5rem;
+  color: var(--chord);
   font-weight: 700;
-  font-size: 0.85rem;
+  cursor: help;
 }
 .setlist-entry-notes { flex-basis: 100%; color: var(--muted); font-style: italic; }
+/* Both notes fields render Markdown now (SPEC.md §6.2), not plain text — a
+   browser's own default paragraph/list margins are too generous for a
+   compact list row, so they're tightened here rather than left at default. */
+.setlist-set-notes p, .setlist-set-notes ul, .setlist-set-notes ol, .setlist-set-notes blockquote,
+.setlist-entry-notes p, .setlist-entry-notes ul, .setlist-entry-notes ol, .setlist-entry-notes blockquote,
+.print-floor-sheet-note p, .print-floor-sheet-note ul, .print-floor-sheet-note ol, .print-floor-sheet-note blockquote {
+  margin: 0.25em 0;
+  padding-left: 1.25em;
+}
+.setlist-set-notes p:first-child, .setlist-entry-notes p:first-child,
+.print-floor-sheet-note p:first-child { margin-top: 0; }
+.setlist-set-notes p:last-child, .setlist-entry-notes p:last-child,
+.print-floor-sheet-note p:last-child { margin-bottom: 0; }
+.setlist-set-notes blockquote, .setlist-entry-notes blockquote,
+.print-floor-sheet-note blockquote { padding-left: 0.75em; border-left: 2px solid var(--border); }
+/* A modal over the song itself, shown when opening it from within a
+   setlist (SPEC.md §6.2) — the dimmed backdrop is UI chrome signalling a
+   modal state, not a background tint on content (SPEC.md §14's own rule is
+   about song text, not this). The box itself stays plain --bg/--ink, no
+   colour of its own, same as everywhere else in this page. */
+#setlist-note-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  padding: 2rem;
+  background: rgba(0, 0, 0, 0.6);
+  cursor: pointer;
+}
+#setlist-note-modal-content {
+  background: var(--bg);
+  color: var(--ink);
+  border: 1px solid var(--ink);
+  padding: 1.5rem 2rem;
+  max-width: 32rem;
+  max-height: 70vh;
+  overflow-y: auto;
+  font-size: 1.2rem;
+  cursor: auto;
+}
+#setlist-note-modal-hint { color: #fff; font-size: 0.85rem; margin: 0; }
 </style>
 </head>
 <body>
@@ -2425,6 +2957,7 @@ a.setlist-entry-name:hover { text-decoration: underline; }
 <select id="instrument-select" class="hidden" aria-label="Instrument"></select>
 <button id="toggle-chords-button" type="button" class="hidden" title="Hide chords" aria-label="Hide chords">[<span id="toggle-chords-glyph">C</span>]</button>
 <button id="print-song-button" type="button" class="hidden" title="Print this song" aria-label="Print this song">&#128424;&#65039;</button>
+<label id="setlist-notes-label" class="hidden"><input type="checkbox" id="setlist-notes-checkbox" checked> Show notes</label>
 </div>
 <button id="menu-bar-overflow-toggle" type="button" class="hidden" aria-label="More song options">&#9776;</button>
 <button id="next-song-button" type="button" class="hidden" title="Next song" aria-label="Next song">&rsaquo;</button>
@@ -2443,6 +2976,7 @@ a.setlist-entry-name:hover { text-decoration: underline; }
 <section id="setlist-index-view" class="hidden">
 <h1>Setlists</h1>
 <button id="back-from-setlist-index-button" type="button">Back to songs</button>
+<input id="setlist-search" type="search" placeholder="Find a setlist&hellip;" aria-label="Find a setlist">
 <ul id="setlist-list"></ul>
 </section>
 
@@ -2451,6 +2985,11 @@ a.setlist-entry-name:hover { text-decoration: underline; }
 <div id="chord-diagrams" class="hidden"></div>
 </section>
 
+<div id="setlist-note-modal" class="hidden">
+<div id="setlist-note-modal-content"></div>
+<p id="setlist-note-modal-hint">Click anywhere to continue</p>
+</div>
+
 <section id="setlist-view" class="hidden">
 <nav id="setlist-menu-bar">
 <button id="back-from-setlist-button" type="button">Back to setlists</button>
@@ -2458,20 +2997,24 @@ a.setlist-entry-name:hover { text-decoration: underline; }
 <button id="toggle-notes-button" type="button">Hide notes</button>
 <button id="print-setlist-button" type="button">Print this setlist</button>
 </nav>
+<input id="setlist-entries-search" type="search" placeholder="Find in this setlist&hellip;" aria-label="Find in this setlist">
 <div id="setlist-entries"></div>
 </section>
 
 <section id="print-view" class="hidden">
+<button id="done-printing-button" type="button" title="Done printing" aria-label="Done printing">&times;</button>
 <div id="print-banner">
 <p>When you're done printing (or if you change your mind), press <kbd>Escape</kbd> or click
-"Done printing" below to come back. Printing opens in this same window rather than a new
-one — a new window doesn't work in some contexts (SharePoint, Dropbox) this page may be
+the &times; button top right to come back. Printing opens in this same window rather than a
+new one — a new window doesn't work in some contexts (SharePoint, Dropbox) this page may be
 opened from.</p>
 <select id="print-instrument-select" aria-label="Instrument"></select>
+<label id="include-toc-label"><input type="checkbox" id="include-toc-checkbox" checked> Title page &amp; contents</label>
 <label id="large-print-label"><input type="checkbox" id="large-print-checkbox"> Large print</label>
 <label id="facing-pages-label"><input type="checkbox" id="facing-pages-checkbox" checked> Keep songs on facing pages</label>
+<label id="floor-sheet-label" class="hidden"><input type="checkbox" id="floor-sheet-checkbox"> Floor sheet (song list only)</label>
+<label id="floor-sheet-notes-label" class="hidden"><input type="checkbox" id="floor-sheet-notes-checkbox" checked> Include notes</label>
 <button id="print-now-button" type="button">Print now</button>
-<button id="done-printing-button" type="button">Done printing</button>
 </div>
 <div id="print-content"></div>
 </section>

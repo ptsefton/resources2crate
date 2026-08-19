@@ -46,6 +46,9 @@ parsing, chord transposition, and chord-diagram rendering.
   resources2crate pipeline.
 - Render the resulting crate into a standalone songbook HTML page: song list, song view,
   setlists, key/capo/instrument controls, chord diagrams, print mode.
+- TODO - when PT asks: 
+  - Bundling any default chord-shape data or `{define:}` directives from a song's own text — chord shapes shown on screen or in print come only from chordprobook's own bundled data
+  (
 
 **Out of scope (permanent, not deferred):**
 - Editing songs or setlists, or writing back to the source folder — true of Harvesting and
@@ -53,9 +56,7 @@ parsing, chord transposition, and chord-diagram rendering.
   `{st:}` cleanup tool (§1, §15), a standalone action outside
   `runPipeline()`/`processFolder()` entirely, authorised specifically for that narrow
   purpose.
-- Bundling any default chord-shape data or `{define:}` directives from a song's own text —
-  chord shapes shown on screen or in print come only from chordprobook's own bundled data
-  (§7).
+
 - Any music-theory logic beyond what chordprobook already provides — transposition, capo
   math, and Nashville numbering are chordprobook's responsibility, not reimplemented here.
 
@@ -139,30 +140,51 @@ Setlist files are Markdown with a specific dialect layered on top:
 {Title: Gig number 1,000}      <- optional, first non-blank line only, {directive: value}
                                    syntax (not YAML frontmatter). Falls back to filename.
 
-# Set 1                        <- a set/section heading (H1) — informational grouping only.
+# Set 1                        <- a set heading (H1) — modelled as its own nested MusicPlaylist
+
+Tune guitars to drop D now.   <- freeform text before the first entry becomes that set's own
+                                   `text` — a Markdown note for the whole set, not any one song
 
 ## Slot Machine Baby           <- a setlist entry (H2): the heading text is matched against
                                    known song titles (§6.1)
 
 > Play with a lively feel...   <- performance notes: any non-blank, non-heading line(s)
 >> But not **that** lively!       immediately following an entry, up to the next heading,
-                                   concatenated verbatim into that entry's description.
-                                   Blockquote ("> ") markup is not required — any non-blank,
-                                   non-heading line counts as a note.
+                                   concatenated verbatim into that entry's own `text` and
+                                   rendered as Markdown (§6.2). Blockquote ("> ") markup is
+                                   not required — any non-blank, non-heading line counts as a
+                                   note.
 
 ## Baby {transpose: -2}        <- inline {directive: value} after the title overrides that
                                    entry's transpose/capo for this performance, independent
                                    of the matched song's own values
 ```
-
 - **Each entry is its own `MusicComposition`** — a proxy for one performance slot, linked to
-  the canonical Song it performs via `specializationOf`. It never carries `text` (§5).
-- **Sets are a plain string, not their own entity.** Each entry carries the text of the
-  nearest preceding `#` heading as `custom:setName`.
+  the canonical Song it performs via `specializationOf`. It never duplicates that Song's own
+  full lyrics (§5) — the only `text` an entry ever carries is its own performance note, if it
+  has one, a different kind of content under the same property name (§6.2, §7).
+- **Sets within a setlist are marked with a Markdown `# Set 1` heading** — used to group songs
+  for a multi-set gig. Where present, each set is modelled as its own nested `MusicPlaylist`
+  entity, with `hasPart` pointing at that set's own entries; the top-level setlist's own
+  `hasPart` then points at a mix of these set entities and any entries that appear before the
+  first `#` heading at all (which stay direct children of the setlist itself, ungrouped,
+  exactly as every entry behaved before `#` sets existed as their own entities). A setlist
+  that never uses `#` produces zero set entities — a strict superset of the old behaviour, not
+  a replacement for it in the common case. There is **no `custom:setName` any more** — which
+  set (if any) an entry belongs to is expressed structurally, by which set's own `hasPart`
+  references it, not as a flat string property on the entry (see §7's entity-shape examples).
+  Freeform text between a set's own `#` heading and its first entry (e.g. "Tune guitars to
+  drop D now") becomes that set entity's own `text` (rendered as Markdown — §6.2) — a warm-up
+  note for the whole set, not any one song — present only when such text actually exists.
+  Grouping is by consecutive runs of matching set-heading text: two `#` sections that happen to
+  share a literal name are only treated as one group when they're directly adjacent, since
+  grouping works from the flat entry list alone, without tracking each `#` line's own position
+  in the file. A setlist that genuinely repeats a set name for two separate, non-adjacent
+  sections is a known, accepted edge case this plugin doesn't try to disambiguate further
+  (`test-chordpro-crate.mjs` documents the exact behaviour, rather than treating it as a bug).
 - **Entry-level overrides.** `{transpose: N}` / `{tr: N}` and `{capo: N}` found inline on a
   `##` line become `custom:transpose` / `custom:capo` directly on the entry, taking
-  precedence over the matched Song's own values — the same song can appear in two setlists
-  performed in two different keys.
+  precedence over the matched Song's own values — the same song can appear in two setlists, or even the same setlist performed in two different keys.
 
 ### 6.1 Matching an entry to a song
 
@@ -184,10 +206,52 @@ Setlist files are Markdown with a specific dialect layered on top:
 
 `matchStatus` is present on every entry, not only ones that failed to resolve.
 
+### 6.2 Setlist and set display
+
+A setlist displays as a list of its songs, divided by "Set N" headings when the source markdown
+has any, each entry showing its own performance note underneath (§12's "Credit line and key in
+list rows" section, and "Setlist-entries search", cover the row-by-row detail; this section is
+about the setlist-as-a-whole and song-view behaviour). Clicking a song shows that song with
+prev/next arrows scoped to that setlist's own order, not the global song list, until the reader
+explicitly leaves it (SPEC.md §11's "A setlist becomes the active browsing context" note).
+
+**Notes render as Markdown, not plain text — a deliberate property choice, not just a display
+one.** Both an entry's own note and a set's own note (the freeform text before its first
+entry, §6) are written to the crate as `text` rather than `description` — a canonical Song
+entity's own `text` is its verbatim ChordPro source, but this is a genuinely different kind of
+content living under the same property name: a short Markdown note, meant to be rendered, not
+parsed as ChordPro or read as an unstructured summary. `renxderNoteMarkdown` (`songbook_html.js`)
+supports paragraphs, blockquote lines (`>`/`>>`, any depth flattened to one level), numbered
+(`1. `) and bullet (`- `/`* `) lists, and inline `**bold**`/`*italic*` — not a general Markdown
+implementation, just what a real setlist note has actually used (chordprosite's own sample
+setlist already mixed a blockquote with `**bold**`; `sample.setlist.md` here now also
+demonstrates a set-level paragraph-then-list). It builds real DOM nodes via `createElement`
+rather than an HTML string for `innerHTML` — the same reason `buildSongPrintPage`'s own table of
+contents does (§13): this function's source is embedded into the page via `.toString()`, so an
+HTML-string template literal spelling out an actual tag would sit in the page's own embedded
+script as literal text, indistinguishable from the page having actually pre-rendered one.
+
+**Opening a song from within a setlist shows that entry's own note as a modal over the song
+itself**, not only inline back in the list a reader may have already scrolled away from — PT:
+"put up a modal over the song with the notes on it eg 'Tune guitars to drop D now'". Re-decided
+fresh on every `showSong()` call, not just once per setlist, since a different entry can have a
+different note (or none at all). Dismissed by a click anywhere on it, not a specific close
+button — "any click on that should make it go away" (PT's own words). A `#setlist-notes-checkbox`
+in the song view's own menu-bar overflow, checked by default, controls whether this happens at
+all; unchecking it while a note is already showing hides it immediately, and it stays hidden
+until re-checked. Hidden itself, along with the modal, whenever there's no active setlist to
+begin with (opening a song from the global list) — there's no entry, and so no note, in that
+context. Never shown for a *set's* own note (only an entry's) — that note is already visible
+once, inline, before the reader ever opens a song from that set; showing it again on every song
+within it would be redundant.
+
+
 ## 7. Entity shapes
 
-No custom `@type` is minted. A Song and a setlist entry are both typed `MusicComposition`;
-a Setlist is typed `MusicPlaylist`.
+No custom `@type` is minted. A Song and a setlist entry are both typed `MusicComposition`; a
+Setlist and each of its own nested "#" sets (§6) are both typed `MusicPlaylist` — told apart
+only by `@id` shape, never by type: a set's own `@id` is always `<setlist path>#set-N`, which
+a real setlist file's own path can never look like (a "#" isn't valid in one).
 
 ```jsonc
 {
@@ -221,9 +285,25 @@ a Setlist is typed `MusicPlaylist`.
   "@type": "MusicPlaylist",
   "name": "Gig number 1,000",
   "hasPart": [
+    { "@id": "sample.setlist.md#set-1" },
+    { "@id": "sample.setlist.md#set-2" }
+    // A mix of set references and direct entry references, in performance
+    // order — an entry appearing before the first "#" heading at all would
+    // sit directly in this array instead of inside a set (§6).
+  ]
+},
+{
+  "@id": "sample.setlist.md#set-1",
+  "@type": "MusicPlaylist",
+  "name": "Set 1",
+  "text": "Tune guitars to drop D now.",
+  // Only present when the source markdown actually had freeform text
+  // between "# Set 1" and its first entry (§6) — most sets have none.
+  // `text`, not `description` — it can be Markdown, rendered as such
+  // (§6.2), which `description` doesn't conventionally imply.
+  "hasPart": [
     { "@id": "sample.setlist.md#entry-1" },
     { "@id": "sample.setlist.md#entry-2" }
-    // Array order is performance order — significant, but not enforced by JSON-LD itself.
   ]
 },
 {
@@ -231,27 +311,29 @@ a Setlist is typed `MusicPlaylist`.
   "@type": "MusicComposition",
   "name": "Slot Machine Baby",
   "specializationOf": { "@id": "slot_machine_baby.cho.txt" },
-  "custom:setName": "Set 1",
   "custom:matchStatus": "exact",
-  "description": "Play with a lively feel, start with a manic synth solo!\n>> But not **that** lively!"
-  // No "text" — the full song text lives exactly once, on the Song entity above.
+  "text": "> Play with a lively feel, start with a manic synth solo!\n>> But not **that** lively!"
+  // Not the canonical Song's own full lyrics — this is the entry's own
+  // performance note (§6.2), a deliberate overload of the same property
+  // name the Song entity above uses for something different (its own
+  // verbatim ChordPro source). No "custom:setName" either — which set this
+  // entry belongs to is that set's own hasPart (above) referencing it, not
+  // a property here.
 }
 ```
 
 | Field | Property | Standard or custom? |
 |---|---|---|
 | a song's title / an entry's raw heading | `name` | standard (`Thing`) |
-| a song's full source text | `text` | standard (`CreativeWork`) |
+| a song's full source text, *or* an entry's/set's own Markdown note | `text` | standard (`CreativeWork`) — a deliberate overload: on a canonical Song it's the verbatim ChordPro source; on a setlist entry or a set (§6) it's an unrelated, shorter piece of Markdown, rendered as such (§6.2), never both on the same entity |
 | a song's key | `musicalKey` | standard (`MusicComposition`) |
 | a song's composer credit | `composer` | standard (`MusicComposition`) — a bare string, not a Person/Organization reference |
 | a song's `{artist}` credit | `performer` | standard (`MusicComposition`/`Event`) — a bare string, not a Person/Organization reference, same simplification as `composer` |
 | a song's `{subtitle}`/`{st}` | `subtitle` | standard (`CreativeWork`) |
-| a setlist's ordered entries | `hasPart` | standard (`CreativeWork`) |
+| a setlist's or a set's ordered members | `hasPart` | standard (`CreativeWork`) — this is what expresses a set's own membership in its setlist, and an entry's in its set, structurally (§6); there is no separate "which set does this belong to" property on an entry |
 | an entry's link to the song it performs | `specializationOf` | standard (`CreativeWork`) |
-| an entry's performance notes | `description` | standard (`Thing`) |
 | capo position | `custom:capo` | custom — a string containing an integer on a Song entity (a song's own `{capo}`, SPEC.md §5); a JS number on a setlist entry (an inline `{capo: N}` override, parsed independently by `Setlist.js`, SPEC.md §6) — the one property in this crate whose type depends on which kind of entity carries it |
 | transpose value | `custom:transpose` | custom |
-| which set/section an entry belongs to | `custom:setName` | custom |
 | this plugin's confidence in a match | `custom:matchStatus` | custom |
 | every candidate when a match was ambiguous | `custom:matchCandidates` | custom |
 
@@ -262,13 +344,13 @@ uses them:
 |---|---|
 | `arcp://name,custom/terms#capo` | Capo |
 | `arcp://name,custom/terms#transpose` | Transpose |
-| `arcp://name,custom/terms#setName` | Set Name |
 | `arcp://name,custom/terms#matchStatus` | Match Status |
 | `arcp://name,custom/terms#matchCandidates` | Match Candidates |
 
 (`name`, `text`, `musicalKey`, `composer`, `performer`, `subtitle`, `hasPart`,
-`specializationOf`, `description` are standard schema.org properties already defined by every
-profile's base context — none of them gets an entry in the table above.)
+`specializationOf` are standard schema.org properties already defined by every profile's base
+context — none of them gets an entry in the table above. `description` isn't used anywhere in
+this crate at all — notes use `text` instead, deliberately, per this section's own note above.)
 
 ## 8. File layout
 
@@ -329,8 +411,7 @@ person writing song/setlist files, has not yet been written.
   ChordPro text.
 - Exporting the crate as a downloadable RO-Crate (data only, or with source files written
   out via the File System Access API).
-- A dedicated print view for setlists that separates them by matching confidence, or any
-  further setlist-editing UI.
+
 
 **Open questions:**
 1. Whether a top-level folder should carry structural meaning (a grouping entity, as
@@ -342,6 +423,7 @@ person writing song/setlist files, has not yet been written.
    cross-referenced in any way; they simply coexist as unrelated entities.
 4. No MASP profile currently selects `inputMode: "chordpro"` (§3), so an end-to-end build
    requires manual configuration in Settings.
+
 
 ---
 
@@ -429,10 +511,19 @@ Node.
 
 `initSongbookApp` cannot import `crate_index.js` or chordprobook normally — it runs inside
 the generated page, on whatever machine later opens it, not inside resources2crate. It
-re-implements the "is this a canonical song" check (`"text" in entity`) inline for the same
-reason. `test-songbook-html.mjs` calls `initSongbookApp` directly against a fake
-`document`/`window`, including simulating real clicks, as the one copy of this logic that's
-actually tested.
+re-implements the "is this a canonical song" check inline for the same reason: an entity is
+a canonical Song, not a setlist-entry proxy, when it carries neither `specializationOf` nor
+`custom:matchStatus` (§7) — the two share `MusicComposition` as their `@type`, so this is
+never decided by @id shape or by which of an entity's *other* properties happen to be
+present (an entry can carry its own `text` too now, its performance note — §6.2/§7 — so that
+alone can't tell the two apart either). `specializationOf` is the semantically meaningful
+signal (an entry that resolved to a song genuinely *is* a specialization of it — SPEC.md §6.1,
+PROV's own term, not schema.org's, but already present in RO-Crate's own context);
+`custom:matchStatus` covers the one case `specializationOf` can't: an *unresolved* entry has
+neither, since there was nothing for it to specialize — common enough in a real, imperfectly-
+matched setlist that it isn't a hypothetical edge case. `test-songbook-html.mjs` calls
+`initSongbookApp` directly against a fake `document`/`window`, including simulating real
+clicks, as the one copy of this logic that's actually tested.
 
 ## 11. Songbook HTML output — views and navigation
 
@@ -446,8 +537,8 @@ otherwise win on specificity while both apply):
 | View | Shown by | Contains |
 |---|---|---|
 | `#list-view` | `showList()` | all songs (searchable, scrollable), each with a composer/artist/subtitle credit line and key (§12), a "Print this songbook" button, a "Setlists" button (hidden if the crate has none) |
-| `#setlist-index-view` | `showSetlistIndex()` | every setlist by name |
-| `#setlist-view` | `showSetlist(index)` | one setlist's entries: position, heading, credit line and key (§12), match-status badge, notes, print/notes-toggle controls |
+| `#setlist-index-view` | `showSetlistIndex()` | every setlist by name (searchable, §12) |
+| `#setlist-view` | `showSetlist(index)` | one setlist's entries (searchable, §12): position, heading (plus that set's own note, if it has one — §12), credit line and key (§12), match-status mark (§11), notes, print/notes-toggle controls |
 | `#song-view` | `showSong(position)` | one song, with the sticky `#app-bar` (prev/next, fullscreen, instrument select, print, hide/show chords) and, inside `#song-content` itself, `#song-header` (title, key/capo — §12) |
 | `#print-view` | `enterPrintView()` | whatever's being printed (§12) |
 
@@ -519,12 +610,14 @@ Clicking a setlist entry that resolved to a song opens that song with the entry'
 transpose/capo override; the song view shows the **canonical song's own name**, never the
 entry's own display heading (they can differ — SPEC.md §6/§7).
 
-A non-exact match gets a specific, actionable message next to it (e.g. "matches more than
-one song — make this entry's heading more specific") rather than the bare status word — the
-only way to actually fix a mismatch is editing the `.setlist.md` file and rebuilding the
-crate, since this page cannot write back to the source folder (§2); the message says so.
-Styled as a bordered badge, not a colour — see §13's note on why colour is reserved for
-chord names.
+A non-exact match gets a small red `~` mark next to it, not a full warning box inline — a
+specific, actionable message (e.g. "matches more than one song — make this entry's heading
+more specific") lives in its `title` attribute, shown as a native tooltip on hover/focus,
+rather than sitting in the row itself and dominating it. The only way to actually fix a
+mismatch is editing the `.setlist.md` file and rebuilding the crate, since this page cannot
+write back to the source folder (§2); the tooltip message says so. A deliberate, narrow
+exception to colour otherwise being reserved for chord names (§14) — PT asked for this over
+an earlier bordered-badge version specifically because it was too visually heavy.
 
 Notes are hidable with one toggle for the whole setlist (`#toggle-notes-button` flips
 `notesVisible` and re-renders every entry), not a control on every row.
@@ -665,6 +758,33 @@ so this exact mistake will pass every test here while doing nothing in a real br
 `#song-list`/`#setlist-list` are both capped to `max-height: 60vh` with their own scroll,
 rather than growing the whole page taller.
 
+**Setlist search.** `#setlist-search`, in `#setlist-index-view`, filters `#setlist-list`'s
+rows the same way — case-insensitive substring match against the setlist's own name, over
+`Array.from(setlistListElement.children)` for the same `.children.forEach`-doesn't-exist
+reason as `#song-search` above. A separate input from `#song-search`, since the two lists
+(`#song-list`, `#setlist-list`) are never visible at the same time.
+
+**Setlist-entries search.** `#setlist-entries-search`, in `#setlist-view` itself (not the
+index of setlists — a third, separate input), filters one open setlist's own entry rows by
+substring match against each row's own `searchText` — the same text the row displays (name,
+credit, notes), stashed as a plain JS property on the row at build time
+(`buildSetlistEntryRow`), not an attribute — nothing outside this file ever needs to read it
+off real HTML. Not index-parallel with `setlist.entries` the way the two searches above are
+with their own arrays: `#setlist-entries` intersperses "Set N" heading rows among the entry
+rows (§6), so a row's position in the DOM doesn't line up with its position in
+`setlist.entries` — `applySetlistEntriesFilter` reads each row's own stashed text instead of
+re-deriving it from an index, and leaves a heading row alone entirely (identified by having
+no `searchText` at all, rather than by its class name).
+
+`applySetlistEntriesFilter` runs from two places, deliberately different in when they clear
+the box first: `showSetlist(index)` clears `#setlist-entries-search` before rendering — a
+leftover query from a previously-viewed setlist isn't assumed relevant to a new one, even
+when "new" means re-opening the same setlist from the index. `renderSetlistEntries` itself
+calls it again at the end of every render, `toggleNotesButton`'s own handler among them — that
+one re-renders the *same* setlist's rows without going through `showSetlist` at all, and a
+filter the reader just typed should survive that refresh rather than silently vanishing
+because every row got rebuilt from scratch.
+
 **Credit line and key in list rows.** Both `#song-list` (`showList()`) and `#setlist-entries`
 (`renderSetlistEntries()`/`buildSetlistEntryRow()`) show, under each title, a single italic
 credit line — `composer`, else `performer` (a song's own `{artist}`), else `subtitle`
@@ -684,26 +804,71 @@ composer/performer/subtitle/key of its own to begin with (only `transpose`/`capo
 and freeform notes — SPEC.md §6/§7). An unresolved entry (`entry.songIndex === -1`, no matching
 song at all) shows neither, for the same reason it has no name link to a song view either.
 
+**Flattening the set hierarchy for display (SPEC.md §6).** The crate's own set/sub-playlist
+entities exist for the data model, not because `renderSetlistEntries()` needs to walk a tree
+to render one: `flattenSetlistParts()` turns one setlist's own `hasPart` — a mix of direct
+entry references and nested "# Set" sub-playlist references, in file order — into the same
+flat array of entries the rest of this file already expected before that hierarchy existed
+(`getActivePlaylist()`, `showPrintSetlist()`, and `renderSetlistEntries()` itself are all
+unchanged), attaching `setName`/`setNotes` to each entry fresh as it flattens rather than
+mutating any shared object. A set's own note (its `text`, SPEC.md §6/§6.2) is attached only
+to the *first* entry in that set, so a single pass through the flattened array renders it
+exactly once — as a `.setlist-set-notes` element, right after that set's own "Set N" heading
+and before its first entry row, the same place `renderSetlistEntries()` already inserts the
+heading itself. It carries no `searchText` of its own, so "Find in this setlist"
+(`applySetlistEntriesFilter`) leaves it shown regardless of the query, the same as the heading
+above it.
+
+Distinguishing a *top-level* setlist from a nested "# Set" sub-playlist — both share the one
+`MusicPlaylist` type (SPEC.md §7) — is done by `@id` shape, not a separate flag: a set's own
+`@id` is always `<setlist path>#set-N` (chordpro_crate.js's own convention), which a real
+setlist file's own path can never look like. `#setlist-list` (the top-level index, §11) is
+built only from `MusicPlaylist` entities whose `@id` contains no `"#"` — a nested set is only
+ever reached by walking a real setlist's own `hasPart`, never listed as an entry in its own
+right.
+
 ## 13. Songbook HTML output — print
 
 `#print-view` replaces the whole screen rather than opening `window.open()` in a new
 window — `window.open()` is blocked or silently does nothing in some contexts this
 standalone page may be opened from (SharePoint, Dropbox's own preview); `window.print()`
-itself prints whatever the *current* window shows, so no popup is needed. An on-screen
-banner (hidden in `@media print`) tells the reader to press Escape or click "Done printing"
-to return to the app; `exitPrintView()` returns to whichever of a song, a setlist, or the
-global list was open beforehand.
+itself prints whatever the *current* window shows, so no popup is needed. `#done-printing-button`
+is a small "×" close button fixed to `#print-view`'s own top-right corner (`position: absolute`),
+not one more inline text button competing for space in the banner's row of other controls below
+it — PT: "more like a window / modal close button." The on-screen banner (hidden in
+`@media print`, along with the close button itself) tells the reader to press Escape or click it
+to return to the app; `exitPrintView()` returns to whichever of a song, a setlist, or the global
+list was open beforehand.
 
 Three entry points, each setting `currentPrintRebuild` (re-invocable with no arguments, so
-changing the instrument mid-preview via `#print-instrument-select` redraws the same job):
+changing the instrument mid-preview via `#print-instrument-select` redraws the same job) and
+each showing/hiding the banner's own controls to match what actually applies to it:
 
-- `showPrintSong()` — the one song currently open, `#print-song-button` (menu bar).
+- `showPrintSong()` — the one song currently open, `#print-song-button` (menu bar). No front
+  matter, facing-page alignment, or floor sheet makes sense for one standalone song, so
+  `#include-toc-label`/`#facing-pages-label`/`#floor-sheet-label` (and its own
+  `#floor-sheet-notes-label`) all stay hidden; large print and instrument selection still apply.
 - `showPrintBook()` — every song, `#print-book-button` (list view), each in its own key/capo
-  rather than whatever's selected on screen.
+  rather than whatever's selected on screen. Floor sheet is a setlist-only mode (below), so its
+  two labels stay hidden; every other control applies.
 - `showPrintSetlist(index)` — one setlist's own entries in setlist order,
   `#print-setlist-button` (setlist view), each in that entry's own transpose/capo override.
   An entry with no matching song has no page to print, so it's skipped from the song pages,
-  but stays on the contents page with "—" in place of a page number.
+  but stays on the contents page with "—" in place of a page number. The one entry point where
+  `#floor-sheet-label` shows at all — ticking `#floor-sheet-checkbox` switches it over to the
+  alternative layout described under "Floor sheets" below, hiding
+  `#include-toc-label`/`#large-print-label`/`#facing-pages-label`/`#print-instrument-select` for
+  as long as it's ticked, since none of them mean anything for a page with no chords or lyrics
+  on it at all.
+
+**Title page and contents, optional.** `#include-toc-checkbox` in the print banner — checked by
+default (the markup's own `checked` attribute) — gates whether `showPrintBook`/
+`showPrintSetlist` call `buildFrontMatterPages` (below) at all. Unticked, every song's own page
+numbering just starts from page 1 instead of after the front matter
+(`1 + (includeToc ? frontMatterPageCount(...) : 0)`, in both functions) — for a reader printing
+a short set who doesn't want a title/contents page ahead of it. `showPrintSong()` never shows
+this control: a standalone single-song print has no book/contents page to include or omit in
+the first place, the same reasoning as it having no page number either (below).
 
 **Page layout.** Each of a song's own sections (`renderSong()`'s own `pages` array — length 1
 unless the source has `{new_page}`/`{np}` directives, in which case one A4 page per section:
@@ -727,7 +892,8 @@ banner/fullscreen button, and zeroes `@page` margins.
 > `fitPrintSongPage`'s available-space calculation.
 
 **Front matter.** `buildFrontMatterPages(titleText, entries)` produces the title + contents
-page(s): one combined page (title, an optional "With chords for [instrument]" subtitle when
+page(s) — skipped entirely when `#include-toc-checkbox` is unticked (above): one combined page
+(title, an optional "With chords for [instrument]" subtitle when
 one is selected, and the contents list) for up to `TOC_SPLIT_THRESHOLD` (50) entries; above
 that, the contents list splits into `Math.ceil(entryCount / TOC_ENTRIES_PER_PAGE)` pages of
 `TOC_ENTRIES_PER_PAGE` (50) entries each, headed "Contents (i/N)", title/subtitle only on
@@ -859,14 +1025,52 @@ for the first song in the whole book; every later one is already aligned automat
 an even page count added to an even start always lands on another even number — but the check
 itself doesn't need to know that distinction; it re-verifies before every song regardless.
 
+**Floor sheets.** `#floor-sheet-checkbox`, setlist print only (`showPrintSetlist`) — PT: "just
+lists songs old skool style for putting at your feet while you play." A wholly separate,
+much simpler page-building path (`buildFloorSheetPages`/`buildFloorSheetPage`/
+`fitFloorSheetPage`), not a variant of the book-style layout above: no chords, no lyrics, just
+each entry's own name in a numbered list — which is also why large print, facing-page
+alignment, instrument selection, and the TOC checkbox are all hidden for as long as it's ticked
+(above), rather than merely ignored while doing nothing.
+
+Entries are grouped by the same consecutive-setName-run idea `groupEntriesIntoSets`
+(`chordpro_crate.js`) already uses to build the nested-`MusicPlaylist` hierarchy in the first
+place (`groupSetlistEntriesForFloorSheet`): entries sharing a setName with the one right before
+them land on the same page; a changed or absent setName starts a new one. A setlist using no
+"#" sets at all becomes a single page, headed by the setlist's own name; one that does use sets
+gets one page per set, each headed by that set's own name, plus — if the setlist mixes in
+entries before its first "#" heading — one further page for just those, headed by the setlist's
+own name in place of a set name it doesn't have.
+
+Unlike every other print path in this file, an entry with no matching song
+(`entry.songIndex === -1`) still gets a line here: there's no *page* to build for a song that
+isn't there, but nothing stops a plain name being listed old-school-style, and the same
+reasoning that keeps an unresolved entry on the normal contents page (above, "—" in place of a
+page number) applies just as much here — silently dropping it would hide the exact mismatch
+this whole feature exists to surface.
+
+`#floor-sheet-notes-checkbox` — its own label shown only while floor sheet mode itself is
+ticked, checked by default — adds each entry's own note underneath its name, via the same
+`renderNoteMarkdown` the on-screen setlist view and note modal already use (§6.2); there's no
+separate print-only note renderer.
+
+Each page is fitted to one A4 sheet the same way a normal song page is
+(`fitFloorSheetPage`/`fitTextToBox`, against the page's own list element) — the heading stays
+whatever size it renders at; only the list (names, plus any notes) scales down once a set has
+enough entries, or long enough notes, to need it. No page numbers, same reasoning as
+`showPrintSong()`'s own standalone print: there's no book/contents page for one to refer back to.
+
 ## 14. Visual design
 
 High contrast: plain black-on-white (white-on-black under `prefers-color-scheme: dark`).
-**Red (`--chord`) is reserved exclusively for chord names** — every other control (buttons,
-borders, the menu bar, match-status badges) uses black/white rather than a colour of its
-own, so red stays a single, unambiguous marker. Chorus/bridge passages and tab blocks are
-set off by a border rule, never a background tint — no filled panel sits behind any text
-anywhere on the page. Song text is serif; UI chrome (buttons, the menu bar) is a plain sans.
+**Red (`--chord`) is otherwise reserved for chord names** — every other control (buttons,
+borders, the menu bar) uses black/white rather than a colour of its own. The one deliberate
+exception is a setlist entry's `~` match-status mark (§11) — PT asked for red there
+specifically, over an earlier bordered-badge version — so red now means two things instead of
+one, though the two never appear in the same view, which keeps the practical ambiguity low.
+Chorus/bridge passages and tab blocks are set off by a border rule, never a background tint —
+no filled panel sits behind any text anywhere on the page. Song text is serif; UI chrome
+(buttons, the menu bar) is a plain sans.
 
 **Not yet built:** a hide-chords toggle, Nashville-number display, or any further style
 controls beyond what's listed in §12.

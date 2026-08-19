@@ -104,11 +104,14 @@ const CREDIT_CRATE_JSON = {
 
 // A setlist with one entry of each SPEC.md §6.1 match status (exact,
 // fuzzy — with its own capo override, ambiguous, unresolved), across two
-// sets, one entry carrying performance notes. Built directly as the crate
-// entities chordpro_crate.js would have produced, not run through the
+// "#" sets, one entry carrying performance notes. Built directly as the
+// crate entities chordpro_crate.js would have produced, not run through the
 // actual matching algorithm — this file is testing what initSongbookApp
 // does with that output, not the matching itself (chordprobook's own
-// test-chordpro-setlist.mjs covers that).
+// test-chordpro-setlist.mjs covers that). Each "#" set is its own nested
+// MusicPlaylist (SPEC.md §6) — neither carries a description here (no
+// freeform text between its own heading and its first entry in this
+// fixture); FLATTEN_SET_NOTES_CRATE_JSON, below, covers that separately.
 const SETLIST_CRATE_JSON = {
   "@graph": [
     { "@id": "./", "@type": "Dataset", name: "Songbook" },
@@ -123,32 +126,159 @@ const SETLIST_CRATE_JSON = {
     {
       "@id": "gig.setlist.md", "@type": "MusicPlaylist", name: "Friday Gig",
       hasPart: [
-        { "@id": "gig.setlist.md#entry-1" },
-        { "@id": "gig.setlist.md#entry-2" },
-        { "@id": "gig.setlist.md#entry-3" },
-        { "@id": "gig.setlist.md#entry-4" },
+        { "@id": "gig.setlist.md#set-1" },
+        { "@id": "gig.setlist.md#set-2" },
       ],
     },
     {
+      "@id": "gig.setlist.md#set-1", "@type": "MusicPlaylist", name: "Set 1",
+      hasPart: [{ "@id": "gig.setlist.md#entry-1" }, { "@id": "gig.setlist.md#entry-2" }],
+    },
+    {
+      "@id": "gig.setlist.md#set-2", "@type": "MusicPlaylist", name: "Set 2",
+      hasPart: [{ "@id": "gig.setlist.md#entry-3" }, { "@id": "gig.setlist.md#entry-4" }],
+    },
+    {
       "@id": "gig.setlist.md#entry-1", "@type": "MusicComposition", name: "Song A",
-      "custom:setName": "Set 1", "custom:matchStatus": "exact",
+      "custom:matchStatus": "exact",
       specializationOf: { "@id": "song-a.cho.txt" },
     },
     {
       "@id": "gig.setlist.md#entry-2", "@type": "MusicComposition", name: "Song B (capo 2)",
-      "custom:setName": "Set 1", "custom:matchStatus": "fuzzy", "custom:capo": 2,
-      description: "Play slow and quiet",
+      "custom:matchStatus": "fuzzy", "custom:capo": 2,
+      text: "Play slow and quiet",
       specializationOf: { "@id": "song-b.cho.txt" },
     },
     {
       "@id": "gig.setlist.md#entry-3", "@type": "MusicComposition", name: "Songg A",
-      "custom:setName": "Set 2", "custom:matchStatus": "ambiguous",
+      "custom:matchStatus": "ambiguous",
       specializationOf: { "@id": "song-a.cho.txt" },
       "custom:matchCandidates": [{ "@id": "song-a.cho.txt" }],
     },
     {
       "@id": "gig.setlist.md#entry-4", "@type": "MusicComposition", name: "Unknown Song",
-      "custom:setName": "Set 2", "custom:matchStatus": "unresolved",
+      "custom:matchStatus": "unresolved",
+    },
+  ],
+};
+
+// One "#" set with its own text (chordpro_crate.js's own property for
+// freeform text between a "#" heading and its first entry — SPEC.md §6/§6.2
+// — a deliberate overload of the same property name a canonical Song uses
+// for its own, differently-meant, verbatim ChordPro source) — separate from
+// SETLIST_CRATE_JSON above so that fixture's own row-index assertions don't
+// have to account for the extra .setlist-set-notes element this produces.
+const SET_NOTES_CRATE_JSON = {
+  "@graph": [
+    { "@id": "./", "@type": "Dataset", name: "Songbook" },
+    { "@id": "song-a.cho.txt", "@type": "MusicComposition", name: "Song A", text: "{title: Song A}\n\n[C]Verse" },
+    {
+      "@id": "gig.setlist.md", "@type": "MusicPlaylist", name: "Friday Gig",
+      hasPart: [{ "@id": "gig.setlist.md#set-1" }],
+    },
+    {
+      "@id": "gig.setlist.md#set-1", "@type": "MusicPlaylist", name: "Set 1",
+      text: "Tune guitars to drop D now.",
+      hasPart: [{ "@id": "gig.setlist.md#entry-1" }],
+    },
+    {
+      "@id": "gig.setlist.md#entry-1", "@type": "MusicComposition", name: "Song A",
+      "custom:matchStatus": "exact", specializationOf: { "@id": "song-a.cho.txt" },
+    },
+  ],
+};
+
+// A set note with a paragraph followed by a numbered list, and an entry note
+// with a blockquote containing **bold** — the same shapes the real,
+// hand-authored sample.setlist.md now uses (SPEC.md §6/§6.2), to check
+// renderNoteMarkdown's actual block/inline parsing, not just its single-line
+// fallback (SET_NOTES_CRATE_JSON, above).
+const RICH_NOTES_CRATE_JSON = {
+  "@graph": [
+    { "@id": "./", "@type": "Dataset", name: "Songbook" },
+    { "@id": "song-a.cho.txt", "@type": "MusicComposition", name: "Song A", text: "{title: Song A}\n\n[C]Verse" },
+    {
+      "@id": "gig.setlist.md", "@type": "MusicPlaylist", name: "Friday Gig",
+      hasPart: [{ "@id": "gig.setlist.md#set-1" }],
+    },
+    {
+      "@id": "gig.setlist.md#set-1", "@type": "MusicPlaylist", name: "Set 1",
+      // Setlist.js's own note-collection joins non-blank lines with "\n",
+      // discarding the blank line that separated them in the source
+      // markdown (chordprobook's own SPEC.md §3.2) — this is exactly what
+      // it hands back for "This is our last gig...\n\n1. No spitting!\n2. ...".
+      text: "This is our last gig so make it a good one\n1. No spitting!\n2. Not too much fighting",
+      hasPart: [{ "@id": "gig.setlist.md#entry-1" }],
+    },
+    {
+      "@id": "gig.setlist.md#entry-1", "@type": "MusicComposition", name: "Slot Machine Baby",
+      "custom:matchStatus": "exact", specializationOf: { "@id": "song-a.cho.txt" },
+      text: "> Play with a lively feel, start with a manic synth solo!\n>> But not **that** lively!",
+    },
+  ],
+};
+
+// For floor-sheet printing (SPEC.md §13, buildFloorSheetPages) — one entry
+// before any "#" set (no setName at all), then a "#" set with two entries:
+// one resolved with its own note, one unresolved. A floor sheet has to
+// still list the unresolved one (unlike every other print path, which
+// skips it — there's no song to print a *page* for, but there's nothing
+// stopping a plain name from being listed old-school-style), which is the
+// one thing none of the fixtures above already cover.
+const FLOOR_SHEET_CRATE_JSON = {
+  "@graph": [
+    { "@id": "./", "@type": "Dataset", name: "Songbook" },
+    { "@id": "song-a.cho.txt", "@type": "MusicComposition", name: "Song A", text: "{title: Song A}\n\n[C]Verse" },
+    { "@id": "song-b.cho.txt", "@type": "MusicComposition", name: "Song B", text: "{title: Song B}\n\n[C]Verse" },
+    {
+      "@id": "gig.setlist.md", "@type": "MusicPlaylist", name: "Friday Gig",
+      hasPart: [
+        { "@id": "gig.setlist.md#entry-0" },
+        { "@id": "gig.setlist.md#set-1" },
+      ],
+    },
+    {
+      "@id": "gig.setlist.md#set-1", "@type": "MusicPlaylist", name: "Set 1",
+      hasPart: [{ "@id": "gig.setlist.md#entry-1" }, { "@id": "gig.setlist.md#entry-2" }],
+    },
+    {
+      "@id": "gig.setlist.md#entry-0", "@type": "MusicComposition", name: "Intro Song",
+      "custom:matchStatus": "exact", specializationOf: { "@id": "song-b.cho.txt" },
+    },
+    {
+      "@id": "gig.setlist.md#entry-1", "@type": "MusicComposition", name: "Song A",
+      "custom:matchStatus": "exact", specializationOf: { "@id": "song-a.cho.txt" },
+      text: "Watch the tempo here",
+    },
+    {
+      "@id": "gig.setlist.md#entry-2", "@type": "MusicComposition", name: "Unknown Song",
+      "custom:matchStatus": "unresolved",
+    },
+  ],
+};
+
+// Two setlists, for "Find a setlist" (#setlist-search) — SETLIST_CRATE_JSON
+// above only has one, which is enough to test opening/rendering a setlist
+// but not filtering a list of them.
+const TWO_SETLISTS_CRATE_JSON = {
+  "@graph": [
+    { "@id": "./", "@type": "Dataset", name: "Two Setlists" },
+    { "@id": "song-a.cho.txt", "@type": "MusicComposition", name: "Song A", text: "{title: Song A}\n\n[C]Verse" },
+    {
+      "@id": "friday.setlist.md", "@type": "MusicPlaylist", name: "Friday Gig",
+      hasPart: [{ "@id": "friday.setlist.md#entry-1" }],
+    },
+    {
+      "@id": "friday.setlist.md#entry-1", "@type": "MusicComposition", name: "Song A",
+      "custom:matchStatus": "exact", specializationOf: { "@id": "song-a.cho.txt" },
+    },
+    {
+      "@id": "saturday.setlist.md", "@type": "MusicPlaylist", name: "Saturday Session",
+      hasPart: [{ "@id": "saturday.setlist.md#entry-1" }],
+    },
+    {
+      "@id": "saturday.setlist.md#entry-1", "@type": "MusicComposition", name: "Song A",
+      "custom:matchStatus": "exact", specializationOf: { "@id": "song-a.cho.txt" },
     },
   ],
 };
@@ -304,18 +434,35 @@ function fakeDocument(crateJson, { rejectFullscreen = false } = {}) {
     "print-now-button": makeElement(),
     "done-printing-button": makeElement(),
     "print-instrument-select": makeElement(),
+    // checked: true to match the real markup's own `checked` attribute,
+    // same reasoning as facing-pages-checkbox just below.
+    "include-toc-label": makeElement(),
+    "include-toc-checkbox": { ...makeElement(), checked: true },
+    "large-print-label": makeElement(),
     "large-print-checkbox": makeElement(),
     // checked: true to match the real markup's own `checked` attribute
     // (<input type="checkbox" id="facing-pages-checkbox" checked>) — unlike
     // every other fake element here, whose defaults all match an
     // *unrendered* real one, since HTML attributes aren't something this
     // fake document parses at all (this file's own header comment).
+    "facing-pages-label": makeElement(),
     "facing-pages-checkbox": { ...makeElement(), checked: true },
+    "floor-sheet-label": makeElement(),
+    "floor-sheet-checkbox": makeElement(),
+    "floor-sheet-notes-label": makeElement(),
+    "floor-sheet-notes-checkbox": { ...makeElement(), checked: true },
+    // checked: true to match the real markup's own `checked` attribute,
+    // same reasoning as facing-pages-checkbox just above.
+    "setlist-notes-checkbox": { ...makeElement(), checked: true },
+    "setlist-notes-label": makeElement(),
+    "setlist-note-modal": makeElement(),
+    "setlist-note-modal-content": makeElement(),
     "fullscreen-button": makeElement(),
     "view-setlists-button": makeElement(),
     "setlist-index-view": makeElement(),
     "back-from-setlist-index-button": makeElement(),
     "setlist-list": makeElement(),
+    "setlist-search": makeElement(),
     "song-search": makeElement(),
     "setlist-view": makeElement(),
     "setlist-view-title": makeElement(),
@@ -323,6 +470,7 @@ function fakeDocument(crateJson, { rejectFullscreen = false } = {}) {
     "print-setlist-button": makeElement(),
     "toggle-notes-button": makeElement(),
     "setlist-entries": makeElement(),
+    "setlist-entries-search": makeElement(),
   };
   // document.addEventListener itself, not just individual elements' — the
   // Escape-key handler is registered on the document, matching where a
@@ -343,7 +491,12 @@ function fakeDocument(crateJson, { rejectFullscreen = false } = {}) {
   };
   const doc = {
     getElementById: (id) => elements[id],
-    createElement: () => makeElement(),
+    // tagName recorded (uppercase, matching a real DOM Element's own),
+    // needed to verify renderNoteMarkdown's actual block structure
+    // (<p>/<ol>/<ul>/<blockquote>/<li>) — every other createElement() call
+    // in this file only ever checks className/textContent, which never
+    // needed the tag itself tracked at all.
+    createElement: (tag) => ({ ...makeElement(), tagName: String(tag).toUpperCase() }),
     addEventListener(type, handler) { docListeners[type] = handler; },
     dispatchKeydown(key) { (docListeners.keydown || (() => {}))({ key }); },
     get documentElement() { return documentElement; },
@@ -355,6 +508,19 @@ function fakeDocument(crateJson, { rejectFullscreen = false } = {}) {
     },
   };
   return { doc, elements };
+}
+
+// The concatenated text of every leaf under `element`, walking .children —
+// this fake DOM's own .textContent is a plain, independently-settable
+// property (unlike a real Element's, which computes itself from
+// descendants), so it's never automatically kept in sync by appendChild the
+// way renderNoteMarkdown's own real-DOM equivalent would be. Needed only for
+// asserting on renderNoteMarkdown's actual (nested) output; nothing else in
+// this file builds nested element trees deep enough for the difference to
+// matter.
+function collectText(element) {
+  if (!element.children || !element.children.length) return element.textContent || "";
+  return element.children.map(collectText).join("");
 }
 
 // The nth <li>'s <a> link, in list order — what a test "clicks" to open a song.
@@ -1827,8 +1993,16 @@ function isFittedFontSize(value) {
   assert.equal(entry2.children.length, 5); // position, name, key, status, notes
   assert.equal(entry2.children[1].textContent, "Song B (capo 2)");
   assert.equal(entry2.children[2].textContent, "C"); // song-b.cho.txt's own {key} — not the entry's capo:2 override
-  assert.ok(entry2.children[3].textContent.includes("matched approximately"));
-  assert.equal(entry2.children[4].textContent, "Play slow and quiet");
+  // The status mark is a small "~", not the message itself (SPEC.md §11) —
+  // the full text lives in `title`, a native hover/focus tooltip.
+  assert.equal(entry2.children[3].textContent, "~");
+  assert.ok(entry2.children[3].title.includes("matched approximately"));
+  // Rendered as Markdown (SPEC.md §6.2), via real DOM nodes rather than an
+  // HTML string (renderNoteMarkdown's own comment on why) — a single line
+  // with no special syntax becomes one plain <p>.
+  assert.equal(entry2.children[4].children.length, 1);
+  assert.equal(entry2.children[4].children[0].tagName, "P");
+  assert.equal(collectText(entry2.children[4]), "Play slow and quiet");
   assert.equal(isHidden(entry2.children[4]), false); // notesVisible starts true
 
   assert.equal(rows[3].className, "setlist-set-name");
@@ -1838,12 +2012,160 @@ function isFittedFontSize(value) {
   assert.equal(entry3.children.length, 4); // position, name (still a link), key, status
   assert.ok(entry3.children[1].href !== undefined); // <a>, not <span> — songIndex >= 0
   assert.equal(entry3.children[2].textContent, "G"); // resolved to song-a.cho.txt, same as entry 1
-  assert.ok(entry3.children[3].textContent.includes("matches more than one song"));
+  assert.equal(entry3.children[3].textContent, "~");
+  assert.ok(entry3.children[3].title.includes("matches more than one song"));
 
   const entry4 = rows[5];
   assert.equal(entry4.children.length, 3); // position, name (plain, no song to link to), status — no key
   assert.equal(entry4.children[1].href, undefined); // <span> — songIndex === -1
-  assert.ok(entry4.children[2].textContent.includes("no matching song found"));
+  assert.equal(entry4.children[2].textContent, "~");
+  assert.ok(entry4.children[2].title.includes("no matching song found"));
+}
+
+{
+  // A "#" set's own freeform note (SPEC.md §6/§6.2) — chordpro_crate.js's
+  // description on the nested set entity — renders as a .setlist-set-notes
+  // element right after that set's "Set N" heading, before its first entry.
+  const { doc, elements } = fakeDocument(SET_NOTES_CRATE_JSON);
+  initSongbookApp(doc, fakeWindow());
+  setlistLink(elements, 0).click();
+
+  const rows = elements["setlist-entries"].children;
+  assert.equal(rows.length, 3); // "Set 1" heading, its note, then the one entry
+  assert.equal(rows[0].className, "setlist-set-name");
+  assert.equal(rows[0].textContent, "Set 1");
+  assert.equal(rows[1].className, "setlist-set-notes");
+  // Rendered as Markdown (SPEC.md §6.2) via real DOM nodes — a single plain
+  // line becomes one <p>.
+  assert.equal(rows[1].children.length, 1);
+  assert.equal(rows[1].children[0].tagName, "P");
+  assert.equal(collectText(rows[1]), "Tune guitars to drop D now.");
+  assert.equal(rows[2].className, "setlist-entry");
+  assert.equal(rows[2].children[1].textContent, "Song A");
+
+  // Not treated as a search target — "Find in this setlist" leaves it
+  // shown regardless of the query, the same as the heading above it.
+  elements["setlist-entries-search"].value = "nothing matches this";
+  elements["setlist-entries-search"].dispatch("input");
+  assert.equal(isHidden(rows[0]), false);
+  assert.equal(isHidden(rows[1]), false);
+  assert.equal(isHidden(rows[2]), true);
+}
+
+{
+  // renderNoteMarkdown's actual block/inline parsing (SPEC.md §6.2) — a set
+  // note with a paragraph followed by a numbered list, and an entry note
+  // with a blockquote containing **bold** — the same shapes the real
+  // sample.setlist.md now uses, not just the single-plain-line case above.
+  const { doc, elements } = fakeDocument(RICH_NOTES_CRATE_JSON);
+  initSongbookApp(doc, fakeWindow());
+  setlistLink(elements, 0).click();
+
+  const rows = elements["setlist-entries"].children;
+  const setNotes = rows[1]; // "Set 1" heading is rows[0]
+  assert.equal(setNotes.className, "setlist-set-notes");
+  assert.equal(setNotes.children.length, 2); // one <p>, then one <ol>
+  assert.equal(setNotes.children[0].tagName, "P");
+  assert.equal(collectText(setNotes.children[0]), "This is our last gig so make it a good one");
+  assert.equal(setNotes.children[1].tagName, "OL");
+  assert.equal(setNotes.children[1].children.length, 2);
+  assert.equal(setNotes.children[1].children[0].tagName, "LI");
+  assert.equal(collectText(setNotes.children[1].children[0]), "No spitting!");
+  assert.equal(collectText(setNotes.children[1].children[1]), "Not too much fighting");
+
+  const entryNotes = rows[2].children.find((c) => c.className === "setlist-entry-notes");
+  assert.ok(entryNotes, "expected the entry's own notes element");
+  assert.equal(entryNotes.children.length, 1); // both ">"-prefixed lines flatten into one blockquote
+  assert.equal(entryNotes.children[0].tagName, "BLOCKQUOTE");
+  const quoteLines = entryNotes.children[0].children;
+  assert.equal(quoteLines.length, 2);
+  assert.equal(quoteLines[0].tagName, "P");
+  assert.equal(collectText(quoteLines[0]), "Play with a lively feel, start with a manic synth solo!");
+  // "**that**" actually renders as emphasis now, not literal asterisks.
+  assert.equal(collectText(quoteLines[1]), "But not that lively!");
+  const bold = quoteLines[1].children.find((c) => c.tagName === "STRONG");
+  assert.ok(bold, "expected a <strong> element for **that**");
+  assert.equal(bold.textContent, "that");
+}
+
+{
+  // A modal over the song itself, shown when opening it from within a
+  // setlist (SPEC.md §6.2) — PT: "put up a modal over the song with the
+  // notes on it eg 'Tune guitars to drop D now' - any click on that should
+  // make it go away, and add a checkbox in the menu bar to show/not show
+  // notes". Uses RICH_NOTES_CRATE_JSON's own entry, which has a note.
+  const { doc, elements } = fakeDocument(RICH_NOTES_CRATE_JSON);
+  initSongbookApp(doc, fakeWindow());
+
+  // Opening a song from the *global* list never shows it, and the checkbox
+  // controlling it stays hidden too — there's no entry, and so no note, in
+  // that context at all.
+  songLink(elements, 0).click();
+  assert.equal(isHidden(elements["setlist-notes-label"]), true);
+  assert.equal(isHidden(elements["setlist-note-modal"]), true);
+
+  // Opening the same underlying song from within the setlist that performs
+  // it does show it, checkbox included.
+  setlistLink(elements, 0).click(); // into "Friday Gig"
+  const entryLink = elements["setlist-entries"].children[2].children[1]; // Slot Machine Baby's own row
+  entryLink.click();
+  assert.equal(isHidden(elements["setlist-notes-label"]), false);
+  assert.equal(isHidden(elements["setlist-note-modal"]), false);
+  assert.equal(
+    collectText(elements["setlist-note-modal-content"]),
+    "Play with a lively feel, start with a manic synth solo!But not that lively!",
+  );
+
+  // "Any click on that should make it go away" (PT) — the whole modal is
+  // the dismiss target.
+  elements["setlist-note-modal"].click();
+  assert.equal(isHidden(elements["setlist-note-modal"]), true);
+
+  // Unchecking "Show notes" hides an already-open modal immediately, not
+  // just from the next song opened.
+  entryLink.click();
+  assert.equal(isHidden(elements["setlist-note-modal"]), false);
+  elements["setlist-notes-checkbox"].checked = false;
+  elements["setlist-notes-checkbox"].dispatch("change");
+  assert.equal(isHidden(elements["setlist-note-modal"]), true);
+
+  // And stays off — re-opening a song with a note doesn't show it again
+  // while the checkbox is unchecked.
+  entryLink.click();
+  assert.equal(isHidden(elements["setlist-note-modal"]), true);
+
+  // Leaving the song view closes it too, so it can't linger, fixed open,
+  // over an unrelated view.
+  elements["setlist-notes-checkbox"].checked = true;
+  elements["setlist-notes-checkbox"].dispatch("change");
+  entryLink.click();
+  assert.equal(isHidden(elements["setlist-note-modal"]), false);
+  elements["back-to-list-button"].click();
+  assert.equal(isHidden(elements["setlist-note-modal"]), true);
+}
+
+{
+  // "Find a setlist" (#setlist-search) — same filtering idea as "Find a
+  // song" (#song-search) above, against #setlist-list's own rows.
+  const { doc, elements } = fakeDocument(TWO_SETLISTS_CRATE_JSON);
+  initSongbookApp(doc, fakeWindow());
+  elements["view-setlists-button"].click();
+  assert.equal(elements["setlist-list"].children.length, 2);
+
+  elements["setlist-search"].value = "friday";
+  elements["setlist-search"].dispatch("input");
+  assert.equal(isHidden(elements["setlist-list"].children[0]), false); // Friday Gig
+  assert.equal(isHidden(elements["setlist-list"].children[1]), true); // Saturday Session
+
+  elements["setlist-search"].value = "SESSION"; // case-insensitive
+  elements["setlist-search"].dispatch("input");
+  assert.equal(isHidden(elements["setlist-list"].children[0]), true);
+  assert.equal(isHidden(elements["setlist-list"].children[1]), false);
+
+  elements["setlist-search"].value = "";
+  elements["setlist-search"].dispatch("input");
+  assert.equal(isHidden(elements["setlist-list"].children[0]), false);
+  assert.equal(isHidden(elements["setlist-list"].children[1]), false);
 }
 
 {
@@ -1951,6 +2273,58 @@ function isFittedFontSize(value) {
 }
 
 {
+  // "Find in this setlist" (#setlist-entries-search) — filters entry rows
+  // by substring match against name, credit, and notes (whatever
+  // buildSetlistEntryRow stashed as that row's own searchText), while the
+  // "Set 1"/"Set 2" heading rows (rows[0], rows[3]) stay visible regardless
+  // — they have no searchText at all, which applySetlistEntriesFilter
+  // treats as "never hide this".
+  const { doc, elements } = fakeDocument(SETLIST_CRATE_JSON);
+  initSongbookApp(doc, fakeWindow());
+  setlistLink(elements, 0).click();
+  const rows = elements["setlist-entries"].children;
+  const search = elements["setlist-entries-search"];
+
+  search.value = "song b";
+  search.dispatch("input");
+  assert.equal(isHidden(rows[0]), false); // "Set 1" heading — always shown
+  assert.equal(isHidden(rows[1]), true); // Song A
+  assert.equal(isHidden(rows[2]), false); // Song B (capo 2)
+  assert.equal(isHidden(rows[3]), false); // "Set 2" heading — always shown
+  assert.equal(isHidden(rows[4]), true); // Songg A
+  assert.equal(isHidden(rows[5]), true); // Unknown Song
+
+  // Matches the entry's own performance note too, not just its heading.
+  search.value = "quiet";
+  search.dispatch("input");
+  assert.equal(isHidden(rows[2]), false); // Song B (capo 2) — "Play slow and quiet"
+  assert.equal(isHidden(rows[1]), true);
+
+  search.value = "";
+  search.dispatch("input");
+  assert.equal(isHidden(rows[1]), false);
+  assert.equal(isHidden(rows[2]), false);
+
+  // Survives a same-setlist re-render (toggling notes) — renderSetlistEntries
+  // rebuilds every row, and would otherwise silently drop the filter.
+  search.value = "song b";
+  search.dispatch("input");
+  elements["toggle-notes-button"].click();
+  const rowsAfterToggle = elements["setlist-entries"].children;
+  assert.equal(search.value, "song b"); // box itself untouched by the toggle
+  assert.equal(isHidden(rowsAfterToggle[1]), true); // Song A — still filtered out
+  assert.equal(isHidden(rowsAfterToggle[2]), false); // Song B (capo 2)
+
+  // Re-opening a setlist — even the same one — clears the box and drops
+  // the filter, unlike a same-setlist re-render (above): a leftover query
+  // from a previous viewing isn't assumed still relevant.
+  setlistLink(elements, 0).click();
+  assert.equal(elements["setlist-entries-search"].value, "");
+  const rowsAfterReopen = elements["setlist-entries"].children;
+  assert.equal(isHidden(rowsAfterReopen[1]), false);
+}
+
+{
   // "Back to setlists" from a specific setlist goes up one level, to the
   // setlist index — not all the way to the global song list. "Back to
   // songs" on the setlist index is the one that goes there.
@@ -2010,6 +2384,149 @@ function isFittedFontSize(value) {
   elements["done-printing-button"].click();
   assert.equal(isHidden(elements["setlist-view"]), false);
   assert.equal(elements["setlist-view-title"].textContent, "Friday Gig");
+}
+
+/* ---------- "Include TOC and title page" checkbox (SPEC.md §13) ---------- */
+
+{
+  // Checked by default (the markup's own `checked` attribute) — unticking
+  // it drops buildFrontMatterPages entirely from a whole-book print, and
+  // the first song starts at page 1 instead of after a front-matter page.
+  const { doc, elements } = fakeDocument(CRATE_JSON);
+  initSongbookApp(doc, fakeWindow());
+  elements["print-book-button"].click();
+  assert.equal(elements["print-content"].children.length, 3); // front page + 2 songs
+
+  elements["include-toc-checkbox"].checked = false;
+  elements["include-toc-checkbox"].dispatch("change");
+  assert.equal(elements["print-content"].children.length, 2); // just the 2 songs, no front matter
+  const [pageA] = elements["print-content"].children;
+  assert.equal(pageA.printSongTitleElement.textContent, "Amazing Grace");
+}
+
+{
+  // Same toggle, scoped to a setlist print.
+  const { doc, elements } = fakeDocument(SETLIST_CRATE_JSON);
+  initSongbookApp(doc, fakeWindow());
+  setlistLink(elements, 0).click();
+  elements["print-setlist-button"].click();
+  assert.equal(elements["print-content"].children.length, 4); // front page + 3 resolved entries
+
+  elements["include-toc-checkbox"].checked = false;
+  elements["include-toc-checkbox"].dispatch("change");
+  assert.equal(elements["print-content"].children.length, 3); // just the 3 songs
+}
+
+/* ---------- floor sheets: old-school, chords-free setlist print (SPEC.md §13) ---------- */
+
+{
+  // The floor-sheet controls only ever make sense for a setlist print —
+  // hidden for a single-song or whole-book print, along with large
+  // print/facing pages/instrument selection and the TOC checkbox once
+  // floor-sheet mode itself is switched on for a setlist.
+  const { doc, elements } = fakeDocument(SETLIST_CRATE_JSON);
+  initSongbookApp(doc, fakeWindow());
+
+  elements["print-book-button"].click();
+  assert.equal(isHidden(elements["floor-sheet-label"]), true);
+  assert.equal(isHidden(elements["floor-sheet-notes-label"]), true);
+  assert.equal(isHidden(elements["include-toc-label"]), false);
+
+  setlistLink(elements, 0).click();
+  elements["print-setlist-button"].click();
+  assert.equal(isHidden(elements["floor-sheet-label"]), false);
+  assert.equal(isHidden(elements["floor-sheet-notes-label"]), true); // floor-sheet-checkbox starts unticked
+  assert.equal(isHidden(elements["include-toc-label"]), false);
+  assert.equal(isHidden(elements["large-print-label"]), false);
+  assert.equal(isHidden(elements["facing-pages-label"]), false);
+  assert.equal(isHidden(elements["print-instrument-select"]), false);
+
+  elements["floor-sheet-checkbox"].checked = true;
+  elements["floor-sheet-checkbox"].dispatch("change");
+  assert.equal(isHidden(elements["floor-sheet-notes-label"]), false);
+  assert.equal(isHidden(elements["include-toc-label"]), true);
+  assert.equal(isHidden(elements["large-print-label"]), true);
+  assert.equal(isHidden(elements["facing-pages-label"]), true);
+  assert.equal(isHidden(elements["print-instrument-select"]), true);
+}
+
+{
+  // One page per "#" set, plus one further page for any entries before the
+  // first set — every entry gets a line, resolved or not, since a floor
+  // sheet lists names, not songs. "Include notes" starts unticked
+  // (SPEC.md §13's own default reasoning matches includeTocCheckbox: on
+  // for a normal print, but floor sheets default to bare names).
+  const { doc, elements } = fakeDocument(FLOOR_SHEET_CRATE_JSON);
+  initSongbookApp(doc, fakeWindow());
+  setlistLink(elements, 0).click();
+  elements["print-setlist-button"].click();
+  elements["floor-sheet-checkbox"].checked = true;
+  elements["floor-sheet-checkbox"].dispatch("change");
+
+  const pages = elements["print-content"].children;
+  assert.equal(pages.length, 2); // the ungrouped leading entry, then Set 1
+
+  const [introPage, set1Page] = pages;
+  assert.equal(introPage.className, "print-page print-floor-sheet");
+  assert.equal(introPage.printFloorSheetTitleElement.tagName, "H1");
+  assert.equal(introPage.printFloorSheetTitleElement.textContent, "Friday Gig"); // no setName of its own
+  assert.equal(introPage.printFloorSheetListElement.tagName, "OL");
+  assert.equal(introPage.printFloorSheetListElement.children.length, 1);
+  assert.equal(introPage.printFloorSheetListElement.children[0].tagName, "LI");
+  assert.equal(collectText(introPage.printFloorSheetListElement.children[0]), "Intro Song");
+
+  assert.equal(set1Page.printFloorSheetTitleElement.textContent, "Set 1");
+  const set1Items = set1Page.printFloorSheetListElement.children;
+  assert.equal(set1Items.length, 2);
+  // "Include notes" is checked by default (the markup's own `checked`
+  // attribute) — entry-1's own note renders right under its name.
+  assert.equal(set1Items[0].children.length, 2);
+  assert.equal(set1Items[0].children[1].className, "print-floor-sheet-note");
+  assert.equal(collectText(set1Items[0].children[1]), "Watch the tempo here");
+  assert.equal(collectText(set1Items[0].children[0]), "Song A");
+  // The unresolved entry ("Unknown Song", no specializationOf) still gets
+  // a line, with no note element (it has none) — the one behaviour that
+  // sets a floor sheet apart from every other print path in this file,
+  // which all skip it entirely.
+  assert.equal(set1Items[1].children.length, 1);
+  assert.equal(collectText(set1Items[1]), "Unknown Song");
+}
+
+{
+  // "Include notes" unticked — no note element at all, not just a hidden
+  // one, even though entry-1 has its own text.
+  const { doc, elements } = fakeDocument(FLOOR_SHEET_CRATE_JSON);
+  initSongbookApp(doc, fakeWindow());
+  setlistLink(elements, 0).click();
+  elements["print-setlist-button"].click();
+  elements["floor-sheet-checkbox"].checked = true;
+  elements["floor-sheet-checkbox"].dispatch("change");
+  elements["floor-sheet-notes-checkbox"].checked = false;
+  elements["floor-sheet-notes-checkbox"].dispatch("change");
+
+  const [, set1Page] = elements["print-content"].children;
+  const set1Items = set1Page.printFloorSheetListElement.children;
+  assert.equal(set1Items[0].children.length, 1);
+  assert.equal(collectText(set1Items[0]), "Song A");
+  assert.equal(set1Items[1].children.length, 1);
+}
+
+{
+  // No "#" sets at all — a single page for the whole setlist, headed by
+  // the setlist's own name (TWO_SETLISTS_CRATE_JSON's own setlists are
+  // both flat, direct hasPart-to-entry — no set entities in the middle).
+  const { doc, elements } = fakeDocument(TWO_SETLISTS_CRATE_JSON);
+  initSongbookApp(doc, fakeWindow());
+  setlistLink(elements, 0).click(); // "Friday Gig"
+  elements["print-setlist-button"].click();
+  elements["floor-sheet-checkbox"].checked = true;
+  elements["floor-sheet-checkbox"].dispatch("change");
+
+  assert.equal(elements["print-content"].children.length, 1);
+  const [page] = elements["print-content"].children;
+  assert.equal(page.printFloorSheetTitleElement.textContent, "Friday Gig");
+  assert.equal(page.printFloorSheetListElement.children.length, 1);
+  assert.equal(collectText(page.printFloorSheetListElement.children[0]), "Song A");
 }
 
 {
@@ -2098,6 +2615,15 @@ function isFittedFontSize(value) {
   assert.ok(html.includes('<div id="chord-diagrams"'));
   assert.ok(html.includes('<input type="checkbox" id="large-print-checkbox"'));
   assert.ok(html.includes('<input type="checkbox" id="facing-pages-checkbox" checked'));
+  assert.ok(html.includes('<input type="checkbox" id="include-toc-checkbox" checked'));
+  assert.ok(html.includes('<input type="checkbox" id="floor-sheet-checkbox"'));
+  assert.ok(html.includes('<input type="checkbox" id="floor-sheet-notes-checkbox" checked'));
+  // "Done printing" is now a small close-button icon, positioned outside
+  // #print-banner entirely (its own CSS comment) — SPEC.md §13's own
+  // literal phrasing, "close button top right [x Done printing]" — rather
+  // than one more inline text button in the banner's row of controls.
+  assert.ok(html.includes('<button id="done-printing-button" type="button" title="Done printing"'));
+  assert.ok(html.indexOf("done-printing-button") < html.indexOf('id="print-banner"'));
   assert.ok(!html.includes("type=\"module\"")); // file:// must work — see SPEC.md's UI section
 
   // The chordprobook bundle is embedded, and defines the globals the app

@@ -22,16 +22,17 @@ export const DEFAULT_SETLIST_SUFFIX = ".setlist.md";
 // somewhere in the finished graph (see addUsedPropertyDefinitions), the same
 // "only when it's actually there" discipline the austlang plugin follows for
 // its own custom fields. This list is deliberately short: title/key/composer/
-// performer/subtitle/notes/the entry-to-song link/the setlist-to-entry link
-// all reuse standard schema.org properties instead (name, musicalKey,
-// composer, performer, subtitle, description, specializationOf, hasPart) —
-// see SPEC.md §7. What's left has no schema.org equivalent at all: a
-// capo/transpose value, which set/section an entry belongs to, and this
-// plugin's own match-confidence bookkeeping.
+// performer/subtitle/a note's own text/the entry-to-song link/the
+// setlist-to-entry link/which set an entry belongs to all reuse standard
+// schema.org properties instead (name, musicalKey, composer, performer,
+// subtitle, text, specializationOf, hasPart — the last two also being what
+// expresses a set's own membership in its setlist, and an entry's in its
+// set, structurally, rather than as a flat string property — SPEC.md §7).
+// What's left has no schema.org equivalent at all: a capo/transpose value,
+// and this plugin's own match-confidence bookkeeping.
 const PROPERTY_DEFINITIONS = {
   "custom:capo": { "@id": "arcp://name,custom/terms#capo", "@type": "rdf:Property", name: "Capo" },
   "custom:transpose": { "@id": "arcp://name,custom/terms#transpose", "@type": "rdf:Property", name: "Transpose" },
-  "custom:setName": { "@id": "arcp://name,custom/terms#setName", "@type": "rdf:Property", name: "Set Name" },
   "custom:matchStatus": { "@id": "arcp://name,custom/terms#matchStatus", "@type": "rdf:Property", name: "Match Status" },
   "custom:matchCandidates": { "@id": "arcp://name,custom/terms#matchCandidates", "@type": "rdf:Property", name: "Match Candidates" },
 };
@@ -105,10 +106,44 @@ function buildSongEntity(relativePath, rawText, songExtensions) {
 
 /* ---------- Setlist / setlist-entry entities (SPEC.md §6) ---------- */
 
+// Groups entries into sets (SPEC.md §6) by consecutive runs sharing the
+// same (non-empty) entry.setName — an entry with no set at all (setName
+// "", from a setlist that never uses "#", or one that hasn't reached its
+// first "#" heading yet) is not part of any group and stays a direct child
+// of the top-level setlist itself, exactly as every setlist behaved before
+// "#" sets existed as their own entities at all. Two "#" sections that
+// happen to share a literal name are only treated as one group when
+// they're directly adjacent (nothing else could tell them apart from a
+// flat list of entries alone without also threading Setlist.js's own line
+// position through); a real setlist repeating a set name for two genuinely
+// separate sections is an edge case this plugin doesn't try to disambiguate
+// further. Returns an array of either `{ kind: "entry", entry, index }` or
+// `{ kind: "set", setName, entries: [{ entry, index }, ...] }`, in file
+// order.
+function groupEntriesIntoSets(entries) {
+  const groups = [];
+  let i = 0;
+  while (i < entries.length) {
+    const { setName } = entries[i];
+    if (!setName) {
+      groups.push({ kind: "entry", entry: entries[i], index: i });
+      i += 1;
+      continue;
+    }
+    const members = [];
+    while (i < entries.length && entries[i].setName === setName) {
+      members.push({ entry: entries[i], index: i });
+      i += 1;
+    }
+    groups.push({ kind: "set", setName, entries: members });
+  }
+  return groups;
+}
+
 function buildSetlistEntities(relativePath, rawText, songs, setlistSuffix) {
-  const { title, entries } = parseSetlist(rawText);
-  const entryRefs = [];
+  const { title, entries, setNotes } = parseSetlist(rawText);
   const entryEntities = [];
+  const entryRefsByIndex = [];
   const matchStatuses = [];
 
   entries.forEach((entry, index) => {
@@ -118,14 +153,14 @@ function buildSetlistEntities(relativePath, rawText, songs, setlistSuffix) {
 
     // A lightweight MusicComposition "proxy" for this one performance slot,
     // linked to the canonical Song it performs via specializationOf rather
-    // than duplicating any of that Song's own data — in particular, it never
-    // carries schema:text (SPEC.md §6/§7): the full text exists exactly
-    // once, on the Song entity itself.
+    // than duplicating any of that Song's own data. Which set (if any) this
+    // entry belongs to is expressed structurally now, via which
+    // MusicPlaylist's own hasPart references it (below) — not as a property
+    // on the entry itself (superseded custom:setName, SPEC.md §6/§7).
     const entryEntity = {
       "@id": entryId,
       "@type": "MusicComposition",
       name: entry.rawHeading,
-      "custom:setName": entry.setName || "",
       "custom:matchStatus": match.matchStatus,
     };
     if (entry.transpose !== undefined) entryEntity["custom:transpose"] = entry.transpose;
@@ -135,22 +170,66 @@ function buildSetlistEntities(relativePath, rawText, songs, setlistSuffix) {
     // string-everywhere convention of its own to match, and this value is
     // only ever read back as a number (songbook_html.js's own entriesById).
     if (Number.isInteger(entry.capo)) entryEntity["custom:capo"] = entry.capo;
-    if (entry.notes) entryEntity.description = entry.notes;
+    // `text`, not `description`: a performance note can itself be Markdown
+    // (chordprosite's own sample setlist already mixed blockquote syntax
+    // with **bold** — SPEC.md §6), and songbook_html.js renders it as such
+    // (SPEC.md §6.2) — `description` is conventionally a short plain-text
+    // summary, not markup meant for rendering. This is a deliberate
+    // overload of the same property name the canonical Song entity uses for
+    // its own, differently-meant, verbatim ChordPro source (SPEC.md §5/§7)
+    // — an entry is always distinguishable from a canonical Song by @id
+    // shape regardless (an entry's own always contains "#entry-"), not by
+    // whether `text` happens to be present, which is what makes reusing the
+    // name safe here.
+    if (entry.notes) entryEntity.text = entry.notes;
     if (match.song) entryEntity.specializationOf = { "@id": match.song.id };
     if (match.candidates.length) entryEntity["custom:matchCandidates"] = match.candidates.map((c) => ({ "@id": c.id }));
 
     entryEntities.push(entryEntity);
-    entryRefs.push({ "@id": entryId });
+    entryRefsByIndex.push({ "@id": entryId });
   });
+
+  // One nested MusicPlaylist per "#" set (SPEC.md §6), each with its own
+  // hasPart pointing at that set's own entries — the top-level setlist's own
+  // hasPart then points at a mix of these set entities and any setName-less
+  // entries, in original file order. A setlist that never uses "#" at all
+  // produces zero set entities and an unchanged, flat top-level hasPart —
+  // this is a strict superset of the old behaviour, not a replacement for
+  // it in the common case. @id numbering is this loop's own 1-based count of
+  // sets actually built, not tied to anything Setlist.js itself tracks.
+  const setEntities = [];
+  const topLevelRefs = [];
+  let setNumber = 0;
+  for (const group of groupEntriesIntoSets(entries)) {
+    if (group.kind === "entry") {
+      topLevelRefs.push(entryRefsByIndex[group.index]);
+      continue;
+    }
+    setNumber += 1;
+    const setId = `${relativePath}#set-${setNumber}`;
+    const setEntity = {
+      "@id": setId,
+      "@type": "MusicPlaylist",
+      name: group.setName,
+      hasPart: group.entries.map(({ index }) => entryRefsByIndex[index]),
+    };
+    // Freeform text between the "#" heading and this set's own first entry
+    // (e.g. "Tune guitars to drop D now") — `text`, not `description`, for
+    // the same reason as an entry's own note above: it can be Markdown, and
+    // is rendered as such (SPEC.md §6.2).
+    if (setNotes[group.setName]) setEntity.text = setNotes[group.setName];
+    setEntities.push(setEntity);
+    topLevelRefs.push({ "@id": setId });
+  }
 
   const setlistEntity = {
     "@id": relativePath,
     "@type": "MusicPlaylist",
     name: title || titleFromFilename(relativePath, [setlistSuffix]),
   };
-  if (entryRefs.length) setlistEntity.hasPart = entryRefs;
+  if (topLevelRefs.length) setlistEntity.hasPart = topLevelRefs;
 
-  return { setlistEntity, entryEntities, matchStatuses };
+  return { setlistEntity, setEntities, entryEntities, matchStatuses };
 }
 
 /* ---------- rdf:Property definitions (SPEC.md §7) ---------- */
@@ -241,8 +320,9 @@ export async function buildCrateFromChordProFolder(rootHandle, config, onProgres
 
   for (const { handle, relativePath } of setlistFiles) {
     const rawText = await (await handle.getFile()).text();
-    const { setlistEntity, entryEntities, matchStatuses } = buildSetlistEntities(relativePath, rawText, songs, setlistSuffix);
+    const { setlistEntity, setEntities, entryEntities, matchStatuses } = buildSetlistEntities(relativePath, rawText, songs, setlistSuffix);
     for (const entryEntity of entryEntities) crate.addEntity(entryEntity);
+    for (const setEntity of setEntities) crate.addEntity(setEntity);
     crate.addEntity(setlistEntity);
     rootHasPart.push({ "@id": relativePath });
 
